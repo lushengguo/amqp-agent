@@ -1,5 +1,5 @@
 use rusqlite::{params, Connection, Result};
-use crate::amqp::Message;
+use super::models::Message;
 
 pub struct DB {
     conn: Connection,

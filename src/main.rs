@@ -1,6 +1,9 @@
 mod config;
 mod logger;
 mod amqp;
+mod memory_cache;
+mod db;
+mod models;
 
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -8,7 +11,7 @@ use tokio::{
 };
 use std::error::Error;
 use tracing::{info, warn, error, debug};
-use crate::amqp::Message;
+use crate::models::Message;
 
 async fn dummy_func(message: Message) {
     info!("收到消息: url={}, exchange={}, routing_key={}, message={}, timestamp={}", 

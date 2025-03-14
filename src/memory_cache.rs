@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use crate::amqp::Message;
-use crate::db::DB;
+use super::models::Message;
+use super::db::DB;
 use tracing::{info, warn};
 
 pub struct MemoryCache {

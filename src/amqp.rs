@@ -9,21 +9,13 @@ use amqprs::{
 use tokio::time::{self, Duration, timeout, Instant};
 use std::{sync::Arc, future::Future, pin::Pin};
 use tracing::{info, warn, error};
-use crate::memory_cache::MemoryCache;
+use super::memory_cache::MemoryCache;
+use super::models::Message;
 
 const PUBLISH_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_CONNECT_RETRIES: u32 = 3;
-
-#[derive(Debug, serde::Deserialize, Clone)]
-pub struct Message {
-    pub url: String,
-    pub exchange: String,
-    pub routing_key: String,
-    pub message: String,
-    pub timestamp: u32,
-}
 
 #[derive(Debug, Default)]
 pub struct PublishStats {
