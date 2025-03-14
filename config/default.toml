@@ -6,3 +6,4 @@ port = 8080
 level = "info"  # 可选值: trace, debug, info, warn, error
 directory = "logs"  # 日志文件目录
 prefix = "app"     # 日志文件名前缀 
+max_days = 30      # 日志保留最大天数 

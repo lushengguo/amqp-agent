@@ -144,7 +144,7 @@ impl AmqpPublisher {
         let start_time = Instant::now();
 
         if let Err(e) = self.ensure_connection().await {
-            let mut cache = self.cache.lock().await;
+            let mut cache: tokio::sync::MutexGuard<'_, MemoryCache> = self.cache.lock().await;
             cache.insert(message);
             self.stats.failed_messages += 1;
             return Err(e);
