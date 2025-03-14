@@ -1,4 +1,0 @@
-2025-03-14T15:42:44.066699Z  INFO ThreadId(01) src/main.rs:35: AMQP发布者后台任务已启动
-2025-03-14T15:42:44.069028Z  INFO ThreadId(01) src/main.rs:94: 服务器启动在 127.0.0.1:8080
-2025-03-14T15:43:02.384225Z  INFO ThreadId(01) src/main.rs:35: AMQP发布者后台任务已启动
-2025-03-14T15:43:02.384977Z  INFO ThreadId(01) src/main.rs:94: 服务器启动在 127.0.0.1:8080

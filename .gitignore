@@ -18,3 +18,5 @@ target/
 
 *.sqlite
 .DS_Store
+logs
+*.db
