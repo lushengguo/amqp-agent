@@ -34,12 +34,6 @@ impl MemoryCache {
         self.current_size += 1;
     }
 
-    pub fn batch_insert(&mut self, messages: Vec<Message>) {
-        for message in messages {
-            self.insert(message);
-        }
-    }
-
     fn flush_oldest_to_db(&mut self) {
         let batch_size = self.max_size / 4;
         let mut to_remove = Vec::new();
@@ -79,38 +73,8 @@ impl MemoryCache {
             .collect()
     }
 
-    pub fn get_by_exchange(&self, exchange: &str, n: usize) -> Vec<Message> {
-        self.messages
-            .iter()
-            .rev()
-            .filter(|(_, msg)| msg.exchange == exchange)
-            .take(n)
-            .map(|(_, message)| message.clone())
-            .collect()
-    }
-
-    pub fn flush_all_to_db(&mut self) {
-        if let Ok(mut db) = self.db.lock() {
-            let messages: Vec<Message> = self.messages.values().cloned().collect();
-            match db.batch_insert(&messages) {
-                Ok(_) => {
-                    info!("成功将所有消息({})刷新到数据库", messages.len());
-                    self.messages.clear();
-                    self.current_size = 0;
-                }
-                Err(e) => {
-                    warn!("刷新所有数据到数据库失败: {}", e);
-                }
-            }
-        }
-    }
-
     pub fn size(&self) -> usize {
         self.current_size
-    }
-
-    pub fn max_size(&self) -> usize {
-        self.max_size
     }
 
     pub fn remove(&mut self, timestamp: u32) -> Option<Message> {
@@ -205,30 +169,6 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_insert() {
-        let (mut cache, _, db_path) = setup_test_cache(10);
-
-        let messages = vec![
-            create_test_message("exchange1", "key1", "Message 1", 0),
-            create_test_message("exchange2", "key2", "Message 2", 1),
-            create_test_message("exchange3", "key3", "Message 3", 2),
-        ];
-
-        cache.batch_insert(messages);
-
-        assert_eq!(cache.size(), 3);
-
-        let recent_messages = cache.get_recent(10);
-        assert_eq!(recent_messages.len(), 3);
-
-        assert_eq!(recent_messages[0].exchange, "exchange3");
-        assert_eq!(recent_messages[1].exchange, "exchange2");
-        assert_eq!(recent_messages[2].exchange, "exchange1");
-
-        cleanup_test_resources(&db_path);
-    }
-
-    #[test]
     fn test_cache_overflow() {
         let (mut cache, db_arc, db_path) = setup_test_cache(5);
 
@@ -249,64 +189,6 @@ mod tests {
             let db_messages = db.get_recent_messages(10).unwrap();
             assert_eq!(db_messages.len(), 1);
             assert_eq!(db_messages[0].routing_key, "key_0");
-        }
-
-        cleanup_test_resources(&db_path);
-    }
-
-    #[test]
-    fn test_get_by_exchange() {
-        let (mut cache, _, db_path) = setup_test_cache(10);
-
-        let messages = vec![
-            create_test_message("exchange1", "key1", "Message 1 for exchange1", 0),
-            create_test_message("exchange2", "key1", "Message 1 for exchange2", 1),
-            create_test_message("exchange1", "key2", "Message 2 for exchange1", 2),
-            create_test_message("exchange2", "key2", "Message 2 for exchange2", 3),
-        ];
-
-        cache.batch_insert(messages);
-
-        let exchange1_messages = cache.get_by_exchange("exchange1", 10);
-        assert_eq!(exchange1_messages.len(), 2);
-        for msg in &exchange1_messages {
-            assert_eq!(msg.exchange, "exchange1");
-        }
-
-        let exchange2_messages = cache.get_by_exchange("exchange2", 10);
-        assert_eq!(exchange2_messages.len(), 2);
-        for msg in &exchange2_messages {
-            assert_eq!(msg.exchange, "exchange2");
-        }
-
-        let non_existent = cache.get_by_exchange("non_existent", 10);
-        assert_eq!(non_existent.len(), 0);
-
-        cleanup_test_resources(&db_path);
-    }
-
-    #[test]
-    fn test_get_recent_with_limit() {
-        let (mut cache, _, db_path) = setup_test_cache(20);
-
-        for i in 0..10 {
-            let message = create_test_message(
-                "test_exchange",
-                &format!("key_{}", i),
-                &format!("Message {}", i),
-                i,
-            );
-            cache.insert(message);
-        }
-
-        let limited_messages = cache.get_recent(5);
-        assert_eq!(limited_messages.len(), 5);
-
-        for i in 0..limited_messages.len() - 1 {
-            assert!(
-                limited_messages[i].timestamp > limited_messages[i + 1].timestamp,
-                "消息未按时间戳降序排列"
-            );
         }
 
         cleanup_test_resources(&db_path);
@@ -366,34 +248,6 @@ mod tests {
     }
 
     #[test]
-    fn test_flush_all_to_db() {
-        let (mut cache, db_arc, db_path) = setup_test_cache(10);
-
-        for i in 0..5 {
-            let message = create_test_message(
-                "test_exchange",
-                &format!("key_{}", i),
-                &format!("Message {}", i),
-                i,
-            );
-            cache.insert(message);
-        }
-
-        cache.flush_all_to_db();
-
-        assert_eq!(cache.size(), 0);
-        assert_eq!(cache.get_recent(10).len(), 0);
-
-        {
-            let db = db_arc.lock().unwrap();
-            let db_messages = db.get_recent_messages(10).unwrap();
-            assert_eq!(db_messages.len(), 5);
-        }
-
-        cleanup_test_resources(&db_path);
-    }
-
-    #[test]
     fn test_cache_ordering() {
         let (mut cache, _, db_path) = setup_test_cache(10);
 
@@ -434,7 +288,7 @@ mod tests {
         }
         let cache_duration = start_cache.elapsed();
 
-        cache.flush_all_to_db();
+        cache.flush_oldest_to_db();
 
         let start_db = std::time::Instant::now();
         {
@@ -477,7 +331,9 @@ mod tests {
                 }
 
                 let mut cache = cache_clone.lock().unwrap();
-                cache.batch_insert(messages);
+                for message in messages {
+                    cache.insert(message);
+                }
             });
 
             handles.push(handle);
@@ -492,11 +348,6 @@ mod tests {
 
             let total_expected = threads * messages_per_thread;
             assert_eq!(cache.size(), total_expected);
-
-            for thread_id in 0..threads {
-                let thread_messages = cache.get_by_exchange(&format!("thread_{}", thread_id), 100);
-                assert_eq!(thread_messages.len(), messages_per_thread);
-            }
         }
 
         cleanup_test_resources(&db_path);

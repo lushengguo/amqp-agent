@@ -26,22 +26,6 @@ pub struct PublishStats {
 }
 
 impl PublishStats {
-    pub fn success_rate(&self) -> f64 {
-        if self.total_messages == 0 {
-            0.0
-        } else {
-            self.successful_messages as f64 / self.total_messages as f64
-        }
-    }
-
-    pub fn average_latency(&self) -> Duration {
-        if self.successful_messages == 0 {
-            Duration::from_secs(0)
-        } else {
-            Duration::from_millis(self.total_latency / self.successful_messages)
-        }
-    }
-
     pub fn update_heartbeat(&mut self) {
         self.last_heartbeat = Some(Instant::now());
     }
@@ -70,10 +54,6 @@ impl AmqpPublisher {
             url,
             stats: PublishStats::default(),
         }
-    }
-
-    pub fn get_stats(&self) -> &PublishStats {
-        &self.stats
     }
 
     async fn do_connect(&mut self) -> Result<(), AmqpError> {
@@ -144,7 +124,7 @@ impl AmqpPublisher {
         let start_time = Instant::now();
 
         if let Err(e) = self.ensure_connection().await {
-            let mut cache: tokio::sync::MutexGuard<'_, MemoryCache> = self.cache.lock().await;
+            let mut cache = self.cache.lock().await;
             cache.insert(message);
             self.stats.failed_messages += 1;
             return Err(e);
@@ -192,17 +172,6 @@ impl AmqpPublisher {
                 Err(AmqpError::ChannelUseError("发送超时".to_string()))
             }
         }
-    }
-
-    pub async fn publish_batch(&mut self, messages: Vec<Message>) -> Result<(), AmqpError> {
-        for message in messages {
-            if let Err(e) = self.publish(message).await {
-                warn!("批量发送消息时失败: {}", e);
-
-                continue;
-            }
-        }
-        Ok(())
     }
 
     async fn retry_cached_messages(&mut self) {
