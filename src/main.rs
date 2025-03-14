@@ -1,22 +1,56 @@
-mod config;
-mod logger;
 mod amqp;
-mod memory_cache;
+mod config;
 mod db;
+mod logger;
+mod memory_cache;
 mod models;
 
-use tokio::{
-    net::{TcpListener, TcpStream},
-    io::{BufReader, AsyncBufReadExt},
-};
-use std::error::Error;
-use tracing::{info, warn, error, debug};
+use crate::amqp::AmqpPublisher;
+use crate::db::DB;
+use crate::memory_cache::MemoryCache;
 use crate::models::Message;
+use once_cell::sync::Lazy as SyncLazy;
+use std::error::Error;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as TokioMutex;
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    net::{TcpListener, TcpStream},
+};
+use tracing::{debug, error, info, warn};
 
-async fn dummy_func(message: Message) {
-    info!("收到消息: url={}, exchange={}, routing_key={}, message={}, timestamp={}", 
-        message.url, message.exchange, message.routing_key, message.message, message.timestamp);
-    // 这里是您后续要实现的函数
+static PUBLISHER: SyncLazy<Arc<TokioMutex<AmqpPublisher>>> = SyncLazy::new(|| {
+    let db = Arc::new(Mutex::new(DB::new().expect("无法创建数据库")));
+    let cache = Arc::new(TokioMutex::new(MemoryCache::new(1000, db)));
+
+    let publisher = AmqpPublisher::new("amqp://localhost:5672".to_string(), cache);
+    Arc::new(TokioMutex::new(publisher))
+});
+
+async fn start_publisher_background_tasks() {
+    AmqpPublisher::start_retry_task(PUBLISHER.clone()).await;
+
+    AmqpPublisher::start_heartbeat_task(PUBLISHER.clone()).await;
+
+    info!("AMQP发布者后台任务已启动");
+}
+
+async fn publish_to_rabbitmq(message: Message) -> Result<(), Box<dyn Error>> {
+    let mut publisher = PUBLISHER.lock().await;
+
+    match publisher.publish(message.clone()).await {
+        Ok(_) => {
+            info!(
+                "成功发送消息到 RabbitMQ: exchange={}, routing_key={}",
+                message.exchange, message.routing_key
+            );
+            Ok(())
+        }
+        Err(e) => {
+            error!("发送消息到 RabbitMQ 失败: {}", e);
+            Err(Box::new(e))
+        }
+    }
 }
 
 async fn process_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
@@ -27,15 +61,15 @@ async fn process_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>>
     loop {
         line.clear();
         if reader.read_line(&mut line).await? == 0 {
-            // 连接已关闭
             debug!("连接关闭");
             break;
         }
 
-        // 尝试解析JSON为Message结构体
         match serde_json::from_str::<Message>(line.trim()) {
             Ok(message) => {
-                dummy_func(message).await;
+                if let Err(e) = publish_to_rabbitmq(message).await {
+                    error!("发布消息到RabbitMQ失败: {}", e);
+                }
             }
             Err(e) => {
                 warn!("JSON解析错误: {}", e);
@@ -47,16 +81,14 @@ async fn process_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>>
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // 加载配置
     let settings = config::Settings::new()?;
-    
-    // 初始化日志系统
+
     logger::init_logger(&settings.log)?;
-    
-    // 启动日志清理任务
+
     logger::start_log_cleaner(settings.log.clone());
 
-    // 启动服务器
+    start_publisher_background_tasks().await;
+
     let addr = format!("{}:{}", settings.server.host, settings.server.port);
     let listener = TcpListener::bind(&addr).await?;
     info!("服务器启动在 {}", addr);

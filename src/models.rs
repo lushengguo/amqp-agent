@@ -5,4 +5,4 @@ pub struct Message {
     pub routing_key: String,
     pub message: String,
     pub timestamp: u32,
-} 
+}

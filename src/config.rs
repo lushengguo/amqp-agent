@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use config::Config;
+use serde::Deserialize;
 use std::error::Error;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -30,4 +30,4 @@ impl Settings {
             .try_deserialize::<Settings>()?;
         Ok(settings)
     }
-} 
+}

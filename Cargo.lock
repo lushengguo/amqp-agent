@@ -61,6 +61,7 @@ version = "0.1.0"
 dependencies = [
  "amqprs",
  "config",
+ "once_cell",
  "rand",
  "rusqlite",
  "serde",
