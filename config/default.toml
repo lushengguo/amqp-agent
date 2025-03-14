@@ -1,0 +1,8 @@
+[server]
+host = "127.0.0.1"
+port = 8080
+
+[log]
+level = "info"  # 可选值: trace, debug, info, warn, error
+directory = "logs"  # 日志文件目录
+prefix = "app"     # 日志文件名前缀 
