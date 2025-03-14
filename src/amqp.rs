@@ -254,13 +254,3 @@ impl AmqpPublisher {
         });
     }
 }
-
-#[deprecated(note = "请使用 AmqpPublisher 代替")]
-pub async fn reliable_publish(
-    _connection: &Connection,
-    _exchange: &str,
-    _routing_key: &str,
-    _message: &str,
-) {
-    warn!("此函数已废弃，请使用 AmqpPublisher 代替");
-}
