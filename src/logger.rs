@@ -1,11 +1,16 @@
 use crate::config::LogSettings;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
     fmt::writer::MakeWriterExt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
 };
+
+lazy_static::lazy_static! {
+    static ref GUARD: Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> = Mutex::new(None);
+}
 
 pub fn init_logger(
     config: &LogSettings,
@@ -31,18 +36,28 @@ pub fn init_logger(
         .filename_suffix("log")
         .build(&config.dir)?;
 
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     let file_layer = tracing_subscriber::fmt::layer()
-        .with_writer(non_blocking.with_max_level(level));
+        .with_writer(non_blocking.with_max_level(level))
+        .with_ansi(false)  // 禁用 ANSI 转义序列
+        .with_target(false)  // 不显示目标模块
+        .with_thread_ids(true)  // 显示线程ID
+        .with_thread_names(true)  // 显示线程名称
+        .with_file(true)  // 显示文件名
+        .with_line_number(true);  // 显示行号
 
     let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stdout.with_max_level(level));
+        .with_writer(std::io::stdout.with_max_level(level))
+        .with_target(false);  // 控制台输出也不显示目标模块
 
     tracing_subscriber::registry()
         .with(EnvFilter::from_default_env().add_directive(level.into()))
         .with(file_layer)
         .with(stdout_layer)
         .init();
+
+    // 保存 guard 到全局变量
+    *GUARD.lock().unwrap() = Some(guard);
 
     Ok(())
 }
