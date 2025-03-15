@@ -9,11 +9,31 @@ use amqprs::{
 use std::{future::Future, pin::Pin, sync::Arc};
 use tokio::time::{self, timeout, Duration, Instant};
 use tracing::{error, info, warn};
+use url::Url;
 
 const PUBLISH_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_CONNECT_RETRIES: u32 = 3;
+
+fn parse_amqp_url(url_str: &str) -> Result<(String, String, String), AmqpError> {
+    let url = Url::parse(url_str).map_err(|e| {
+        AmqpError::ChannelUseError(format!("Invalid AMQP URL: {}", e))
+    })?;
+
+    if url.scheme() != "amqp" {
+        return Err(AmqpError::ChannelUseError(
+            "URL scheme must be 'amqp'".to_string(),
+        ));
+    }
+
+    let host = format!("{}:{}", url.host_str().unwrap_or("localhost"), 
+                               url.port().unwrap_or(5672));
+    let username = url.username().to_string();
+    let password = url.password().unwrap_or("guest").to_string();
+
+    Ok((host, username, password))
+}
 
 #[derive(Debug, Default)]
 pub struct PublishStats {
@@ -57,7 +77,8 @@ impl AmqpPublisher {
     }
 
     async fn do_connect(&mut self) -> Result<(), AmqpError> {
-        let args = OpenConnectionArguments::new(&self.url, "amqp-agent", "/");
+        let (host, username, password) = parse_amqp_url(&self.url)?;
+        let args = OpenConnectionArguments::new(&host, &username, &password);
         let connection = Connection::open(&args).await?;
         let channel = connection.open_channel(None).await?;
 
@@ -221,5 +242,145 @@ impl AmqpPublisher {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Message;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::db::DB;
+    use std::sync::Mutex;
+
+    fn setup_test_db() -> Arc<Mutex<DB>> {
+        let db = DB::new().unwrap();
+        Arc::new(Mutex::new(db))
+    }
+
+    async fn wait_for_rabbitmq(url: &str, max_retries: u32) -> bool {
+        for _ in 0..max_retries {
+            let (host, username, password) = match parse_amqp_url(url) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            
+            let args = OpenConnectionArguments::new(&host, &username, &password);
+            match Connection::open(&args).await {
+                Ok(_) => return true,
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            }
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn test_connect_to_local_rabbitmq() {
+        let rabbitmq_url = "amqp://guest:guest@127.0.0.1:5672";
+        
+        // 等待 RabbitMQ 可用
+        if !wait_for_rabbitmq(rabbitmq_url, 5).await {
+            println!("警告: RabbitMQ 服务器不可用，跳过测试");
+            return;
+        }
+
+        // 创建测试数据库和缓存
+        let db = setup_test_db();
+        let cache = Arc::new(tokio::sync::Mutex::new(MemoryCache::new(100, db.clone())));
+        
+        // 创建发布者实例
+        let mut publisher = AmqpPublisher::new(
+            rabbitmq_url.to_string(),
+            cache.clone(),
+        );
+
+        // 测试连接
+        let result = publisher.ensure_connection().await;
+        assert!(result.is_ok(), "连接到本地RabbitMQ失败: {:?}", result);
+
+        // 创建测试消息
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+            
+        let test_message = Message {
+            url: rabbitmq_url.to_string(),
+            exchange: "test_exchange".to_string(),
+            routing_key: "test_key".to_string(),
+            message: "测试消息".to_string(),
+            timestamp,
+        };
+
+        // 测试发布消息
+        let publish_result = publisher.publish(test_message).await;
+        assert!(publish_result.is_ok(), "发布消息失败: {:?}", publish_result);
+
+        // 检查统计信息
+        assert_eq!(publisher.stats.total_messages, 1);
+        assert_eq!(publisher.stats.successful_messages, 1);
+        assert_eq!(publisher.stats.failed_messages, 0);
+        assert!(publisher.stats.last_heartbeat.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_connection_retry() {
+        let db = setup_test_db();
+        let cache = Arc::new(tokio::sync::Mutex::new(MemoryCache::new(100, db.clone())));
+        let mut publisher = AmqpPublisher::new(
+            "amqp://guest:guest@non_existent_host:5672".to_string(),
+            cache.clone(),
+        );
+
+        // 测试连接重试
+        let result = publisher.ensure_connection().await;
+        assert!(result.is_err(), "应该无法连接到不存在的主机");
+        assert_eq!(publisher.stats.failed_messages, 0);
+    }
+
+    #[tokio::test]
+    async fn test_publish_with_cache() {
+        let rabbitmq_url = "amqp://guest:guest@127.0.0.1:5672";
+        
+        // 等待 RabbitMQ 可用
+        if !wait_for_rabbitmq(rabbitmq_url, 5).await {
+            println!("警告: RabbitMQ 服务器不可用，跳过测试");
+            return;
+        }
+
+        let db = setup_test_db();
+        let cache = Arc::new(tokio::sync::Mutex::new(MemoryCache::new(100, db.clone())));
+        let mut publisher = AmqpPublisher::new(
+            rabbitmq_url.to_string(),
+            cache.clone(),
+        );
+
+        // 创建测试消息
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+            
+        let test_message = Message {
+            url: rabbitmq_url.to_string(),
+            exchange: "test_exchange".to_string(),
+            routing_key: "test_key".to_string(),
+            message: "测试缓存消息".to_string(),
+            timestamp,
+        };
+
+        // 确保连接
+        let _ = publisher.ensure_connection().await;
+
+        // 发布消息
+        let result = publisher.publish(test_message.clone()).await;
+        assert!(result.is_ok(), "发布消息失败: {:?}", result);
+
+        // 检查缓存
+        let cache_lock = cache.lock().await;
+        assert_eq!(cache_lock.size(), 0, "成功发送的消息不应该在缓存中");
     }
 }

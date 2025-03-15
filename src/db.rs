@@ -65,7 +65,7 @@ impl DB {
         let mut stmt = self.conn.prepare(
             "SELECT url, exchange, routing_key, message, timestamp 
              FROM messages 
-             ORDER BY created_at DESC 
+             ORDER BY timestamp DESC, created_at DESC 
              LIMIT ?",
         )?;
 
@@ -89,7 +89,7 @@ impl DB {
             "SELECT url, exchange, routing_key, message, timestamp 
              FROM messages 
              WHERE exchange = ?
-             ORDER BY created_at DESC 
+             ORDER BY timestamp DESC, created_at DESC 
              LIMIT ?",
         )?;
 
