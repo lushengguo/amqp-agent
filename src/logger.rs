@@ -20,7 +20,7 @@ pub fn init_logger(log_config: &LogConfig) -> Result<()> {
         &log_config.prefix,
         log_config.max_days,
     ) {
-        eprintln!("清理旧日志文件时出错: {}", e);
+        eprintln!("Error cleaning old log files: {}", e);
     }
 
     let log_level = match log_config.level.to_lowercase().as_str() {
@@ -68,7 +68,7 @@ pub fn start_log_cleaner(log_config: LogConfig) {
                 &log_config.prefix,
                 log_config.max_days,
             ) {
-                error!("定期清理日志文件时出错: {}", e);
+                error!("Error during periodic log file cleanup: {}", e);
             }
         }
     });
@@ -98,7 +98,7 @@ fn cleanup_old_logs(directory: &str, prefix: &str, max_days: u64) -> Result<()> 
                         if age > max_age {
                             fs::remove_file(&path)
                                 .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
-                            info!("已删除过期日志文件: {}", path.display());
+                            info!("Deleted expired log file: {}", path.display());
                         }
                     }
                 }

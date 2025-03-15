@@ -22,7 +22,7 @@ async fn start_publisher_background_tasks() {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             if let Err(e) = retry_cached_messages().await {
-                error!("重试缓存消息失败: {}", e);
+                error!("Failed to retry cached messages: {}", e);
             }
         }
     });
@@ -41,11 +41,11 @@ async fn retry_cached_messages() -> Result<()> {
             Ok(publisher) => {
                 let mut publisher = publisher.lock().await;
                 if let Err(e) = publisher.publish(&message.exchange, &message.exchange_type, &message.routing_key, message.message.as_bytes()).await {
-                    error!("重试发送消息失败: {}", e);
+                    error!("Failed to retry message: {}", e);
                 }
             }
             Err(e) => {
-                error!("获取发布者失败: {}", e);
+                error!("Failed to get publisher: {}", e);
             }
         }
     }
@@ -67,7 +67,7 @@ async fn process_connection(mut stream: TcpStream) -> Result<()> {
     loop {
         line.clear();
         if reader.read_line(&mut line).await? == 0 {
-            debug!("连接关闭");
+            debug!("Connection closed");
             break;
         }
 
@@ -80,11 +80,11 @@ async fn process_connection(mut stream: TcpStream) -> Result<()> {
                     message.routing_key.clone(),
                     message.message.clone()
                 ).await {
-                    error!("发布消息到RabbitMQ失败: {}", e);
+                    error!("Failed to publish message to RabbitMQ: {}", e);
                 }
             }
             Err(e) => {
-                warn!("JSON解析错误: {}", e);
+                warn!("JSON parsing error: {}", e);
             }
         }
     }
@@ -103,20 +103,20 @@ async fn main() -> Result<()> {
 
     let addr = format!("{}:{}", settings.server.host, settings.server.port);
     let listener = TcpListener::bind(&addr).await?;
-    info!("服务器启动在 {}", addr);
+    info!("Server started on {}", addr);
 
     loop {
         match listener.accept().await {
             Ok((socket, addr)) => {
-                info!("新连接: {}", addr);
+                info!("New connection: {}", addr);
                 tokio::spawn(async move {
                     if let Err(e) = process_connection(socket).await {
-                        error!("处理连接时出错: {}", e);
+                        error!("Error processing connection: {}", e);
                     }
                 });
             }
             Err(e) => {
-                error!("接受连接时出错: {}", e);
+                error!("Error accepting connection: {}", e);
             }
         }
     }

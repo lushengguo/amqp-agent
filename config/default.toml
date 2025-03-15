@@ -3,7 +3,7 @@ host = "127.0.0.1"
 port = 8080
 
 [log]
-level = "info"  # 可选值: trace, debug, info, warn, error
-directory = "logs"  # 日志文件目录
-prefix = "app"     # 日志文件名前缀 
-max_days = 30      # 日志保留最大天数 
+level = "info"  # Available values: trace, debug, info, warn, error
+directory = "logs"  # Log file directory
+prefix = "app"     # Log file name prefix
+max_days = 30      # Maximum days to keep logs 

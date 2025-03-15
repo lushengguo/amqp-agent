@@ -176,12 +176,16 @@ mod tests {
 
         assert!(fs::metadata(&db_path).is_ok());
 
-        let mut stmt = db
+        let table_exists = db
             .conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'")
-            .unwrap();
-        let table_exists = stmt.exists([]).unwrap();
-        assert!(table_exists, "messages表应该存在");
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+
+        assert!(table_exists, "messages table should exist");
 
         cleanup_test_db(&db_path);
     }
@@ -246,7 +250,7 @@ mod tests {
         for i in 0..recent_messages.len() - 1 {
             assert!(
                 recent_messages[i].timestamp >= recent_messages[i + 1].timestamp,
-                "消息未按时间戳降序排列"
+                "messages are not sorted by timestamp"
             );
         }
 
@@ -418,10 +422,10 @@ mod tests {
         let all_messages = db.get_recent_messages(200).unwrap();
         assert_eq!(all_messages.len(), 100);
 
-        println!("单条插入耗时: {:?}", individual_duration);
-        println!("批量插入耗时: {:?}", batch_duration);
+        println!("Single insert duration: {:?}", individual_duration);
+        println!("Batch insert duration: {:?}", batch_duration);
         println!(
-            "批量插入性能提升: {:.2}x",
+            "Batch insert performance improvement: {:.2}x",
             individual_duration.as_micros() as f64 / batch_duration.as_micros() as f64
         );
 

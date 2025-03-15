@@ -84,30 +84,30 @@ impl AmqpPublisher {
     async fn do_connect(&mut self) -> Result<()> {
         let (host, username, password, port) = Self::parse_amqp_url(&self.url)?;
         info!(
-            "正在连接到 RabbitMQ 服务器 - 主机: {}, 端口: {}, 用户名: {}",
+            "Connecting to RabbitMQ server - Host: {}, Port: {}, Username: {}",
             host, port, username
         );
         let args = OpenConnectionArguments::new(&host, port, &username, &password);
 
         match Connection::open(&args).await {
             Ok(connection) => {
-                info!("已成功建立到 RabbitMQ 的连接");
+                info!("Successfully established connection to RabbitMQ");
                 self.connection = Some(connection);
                 let channel = self.connection.as_ref().unwrap().open_channel(None).await?;
-                info!("已成功打开 RabbitMQ 通道");
+                info!("Successfully opened RabbitMQ channel");
                 self.channel = Some(channel);
                 self.channel
                     .as_ref()
                     .unwrap()
                     .confirm_select(ConfirmSelectArguments::default())
                     .await?;
-                info!("已启用消息确认模式");
+                info!("Message confirmation mode enabled");
                 self.last_heartbeat = Some(Instant::now());
                 Ok(())
             }
             Err(e) => {
                 error!(
-                    "连接 RabbitMQ 失败 - 主机: {}, 端口: {}, 用户名: {}, 错误: {}",
+                    "Failed to connect to RabbitMQ - Host: {}, Port: {}, Username: {}, Error: {}",
                     host, port, username, e
                 );
                 Err(Box::new(e) as Box<dyn Error + Send + Sync>)
@@ -135,8 +135,8 @@ impl AmqpPublisher {
                 match self.do_connect().await {
                     Ok(_) => return Ok(()),
                     Err(e) => {
-                        let error_msg = format!("连接 RabbitMQ 失败: {}", e);
-                        warn!("{}，将在 3 秒后重试", error_msg);
+                        let error_msg = format!("Failed to connect to RabbitMQ: {}", e);
+                        warn!("{}, will retry in 3 seconds", error_msg);
                         time::sleep(Duration::from_secs(3)).await;
                         retries += 1;
                     }
@@ -144,7 +144,7 @@ impl AmqpPublisher {
             }
 
             Err(
-                Box::new(AmqpError::ChannelUseError("无法建立连接".to_string()))
+                Box::new(AmqpError::ChannelUseError("Unable to establish connection".to_string()))
                     as Box<dyn Error + Send + Sync>,
             )
         })
@@ -172,7 +172,7 @@ impl AmqpPublisher {
 
         if let Some(channel) = &self.channel {
             info!(
-                "正在声明 Exchange - 名称: {}, 类型: {:?}",
+                "Declaring Exchange - Name: {}, Type: {:?}",
                 exchange, exchange_type
             );
 
@@ -185,7 +185,7 @@ impl AmqpPublisher {
             channel.exchange_declare(args.clone()).await?;
             self.declared_exchanges
                 .insert(exchange.to_string(), ExchangeType::from(exchange_type.to_string()));
-            info!("Exchange 声明成功 - {}", exchange);
+            info!("Exchange declared successfully - {}", exchange);
             Ok(())
         } else {
             Err(Box::new(AmqpError::ChannelUseError(
@@ -212,7 +212,7 @@ impl AmqpPublisher {
             "headers" => ExchangeType::Headers,
             _ => {
                 warn!(
-                    "未知的 Exchange 类型: {}, 使用默认类型 Topic",
+                    "Unknown Exchange type: {}, using default type Topic",
                     exchange_type
                 );
                 ExchangeType::Topic
@@ -221,11 +221,11 @@ impl AmqpPublisher {
 
         let exchange_type_str = exchange_type.to_string();
         if let Err(e) = self.declare_exchange(exchange, &exchange_type).await {
-            warn!("声明 Exchange 失败: {} - 尝试继续发送消息", e);
+            warn!("Failed to declare Exchange: {} - attempting to send message anyway", e);
         }
 
         info!(
-            "准备发送消息 - Exchange: {} ({:?}), RoutingKey: {}, 消息长度: {} 字节",
+            "Preparing to send message - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes",
             exchange,
             exchange_type_str,
             routing_key,
@@ -242,7 +242,7 @@ impl AmqpPublisher {
         {
             Ok(_) => {
                 info!(
-                    "消息发送成功 - Exchange: {} ({:?}), RoutingKey: {}, 消息长度: {} 字节",
+                    "Message sent successfully - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes",
                     exchange,
                     exchange_type_str,
                     routing_key,
@@ -252,7 +252,7 @@ impl AmqpPublisher {
             }
             Err(e) => {
                 let error_msg = format!(
-                    "发送消息失败 - Exchange: {} ({:?}), RoutingKey: {}, 消息长度: {} 字节, 错误: {}",
+                    "Failed to send message - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes, Error: {}",
                     exchange,
                     exchange_type_str,
                     routing_key,
@@ -277,7 +277,7 @@ impl AmqpPublisher {
         let message_str = String::from_utf8_lossy(message).to_string();
         let exchange_type_clone = exchange_type.clone();
         info!(
-            "正在缓存消息 - Exchange: {} ({}), RoutingKey: {}, 消息长度: {} 字节",
+            "Caching message - Exchange: {} ({}), RoutingKey: {}, Message size: {} bytes",
             exchange,
             exchange_type_clone,
             routing_key,
@@ -299,7 +299,7 @@ impl AmqpPublisher {
         let mut cache = self.cache.lock().unwrap();
         cache.insert(message);
         info!(
-            "消息已成功缓存 - Exchange: {} ({}), RoutingKey: {}, 当前缓存大小: {} 条消息",
+            "Message cached successfully - Exchange: {} ({}), RoutingKey: {}, Current cache size: {} messages",
             exchange,
             exchange_type_clone,
             routing_key,
@@ -311,7 +311,7 @@ impl AmqpPublisher {
     pub async fn is_connected(&self) -> bool {
         if let Some(last_heartbeat) = self.last_heartbeat {
             if last_heartbeat.elapsed() > Duration::from_secs(30) {
-                warn!("心跳检测失败，重新建立连接");
+                warn!("Heartbeat check failed, reconnecting");
                 return false;
             }
             true
@@ -345,7 +345,7 @@ impl AmqpPublisher {
                     cache.remove(message.timestamp);
                 }
                 Err(e) => {
-                    error!("重试发送消息失败: {}", e);
+                    error!("Failed to retry message: {}", e);
                 }
             }
         }
@@ -359,7 +359,7 @@ impl AmqpPublisher {
                 time::sleep(Duration::from_secs(5)).await;
                 let mut publisher = publisher.lock().await;
                 if let Err(e) = publisher.retry_cached_messages().await {
-                    error!("重试缓存消息失败: {}", e);
+                    error!("Failed to retry cached messages: {}", e);
                 }
             }
         });
@@ -372,7 +372,7 @@ impl AmqpPublisher {
                 let mut publisher = publisher.lock().await;
                 if !publisher.is_connected().await {
                     if let Err(e) = publisher.connect().await {
-                        error!("重新连接失败: {}", e);
+                        error!("Failed to reconnect: {}", e);
                     }
                 }
             }
@@ -427,7 +427,7 @@ mod tests {
         match publisher.connect().await {
             Ok(_) => assert!(true),
             Err(e) => {
-                println!("连接到本地RabbitMQ失败: {}", e);
+                println!("Failed to connect to local RabbitMQ: {}", e);
                 assert!(false);
             }
         }
@@ -460,11 +460,11 @@ mod tests {
                 .await
             {
                 Ok(_) => {
-                    println!("成功发送到 {} ({}) exchange", exchange, ex_type);
+                    println!("Successfully sent to {} ({}) exchange", exchange, ex_type);
                     assert!(true);
                 }
                 Err(e) => {
-                    println!("发送到 {} ({}) exchange 失败: {}", exchange, ex_type, e);
+                    println!("Failed to send to {} ({}) exchange: {}", exchange, ex_type, e);
                     assert!(false);
                 }
             }
@@ -480,7 +480,7 @@ mod tests {
         );
 
         match publisher.connect().await {
-            Ok(_) => assert!(false, "应该连接失败"),
+            Ok(_) => assert!(false, "Should fail to connect"),
             Err(_) => assert!(true),
         }
     }
@@ -501,7 +501,7 @@ mod tests {
         {
             Ok(_) => assert!(true),
             Err(e) => {
-                println!("发布消息失败: {}", e);
+                println!("Failed to publish message: {}", e);
                 assert!(false);
             }
         }

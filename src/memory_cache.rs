@@ -48,17 +48,14 @@ impl MemoryCache {
         }
 
         if let Ok(mut db) = self.db.lock() {
-            match db.batch_insert(&to_db) {
-                Ok(_) => {
-                    info!("成功将 {} 条消息刷新到数据库", to_db.len());
+            if let Err(e) = db.batch_insert(&to_db) {
+                warn!("Failed to flush data to database: {}", e);
+            } else {
+                info!("Successfully flushed {} messages to database", to_db.len());
 
-                    for timestamp in to_remove {
-                        self.messages.remove(&timestamp);
-                        self.current_size -= 1;
-                    }
-                }
-                Err(e) => {
-                    warn!("刷新数据到数据库失败: {}", e);
+                for timestamp in to_remove {
+                    self.messages.remove(&timestamp);
+                    self.current_size -= 1;
                 }
             }
         }
@@ -298,8 +295,8 @@ mod tests {
         }
         let db_duration = start_db.elapsed();
 
-        println!("内存缓存100条消息耗时: {:?}", cache_duration);
-        println!("直接数据库插入100条消息耗时: {:?}", db_duration);
+        println!("Time taken to cache 100 messages in memory: {:?}", cache_duration);
+        println!("Time taken to insert 100 messages directly to database: {:?}", db_duration);
 
         assert!(cache_duration < db_duration);
 
