@@ -17,9 +17,9 @@ DEFAULT_INTERVAL = 2.0      # Send interval (seconds)
 DEFAULT_COUNT = -1          # Number of messages to send, -1 means infinite
 
 # RabbitMQ configuration
-EXCHANGES = ["direct_exchange", "fanout_exchange", "topic_exchange"]
-EXCHANGE_TYPES = ["direct", "fanout", "topic"]
-ROUTING_KEYS = ["key.1", "key.2", "key.3", "key.#", "key.*"]
+EXCHANGES = ["test"]
+EXCHANGE_TYPES = ["direct"]
+ROUTING_KEYS = [""]
 
 class MessageGenerator:
     """Class for generating test messages"""
@@ -40,10 +40,11 @@ class MessageGenerator:
 
         # Generate message content
         message = {
+            "url": "amqp://guest:guest@localhost:5672/",
             "exchange": exchange,
             "exchange_type": exchange_type,
             "routing_key": routing_key,
-            "content": f"Test message #{self.message_id}, sent at: {datetime.datetime.now().isoformat()}",
+            "message": f"Test message #{self.message_id}, sent at: {datetime.datetime.now().isoformat()}",
             "timestamp": timestamp
         }
 
