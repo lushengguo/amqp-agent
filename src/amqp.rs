@@ -247,6 +247,7 @@ impl AmqpPublisher {
                     routing_key,
                     message.len()
                 );
+                self.last_heartbeat = Some(Instant::now());
                 Ok(())
             }
             Err(e) => {
