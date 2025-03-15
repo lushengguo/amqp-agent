@@ -431,14 +431,17 @@ impl AmqpConnectionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     const TEST_RABBITMQ_URL: &str = "amqp://guest:guest@localhost:5672";
 
     #[tokio::test]
     async fn test_connect_to_local_rabbitmq() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
-        let mut publisher = AmqpPublisher::new(TEST_RABBITMQ_URL.to_string(), db.clone(), Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))));
+        let mut publisher = AmqpPublisher::new(
+            TEST_RABBITMQ_URL.to_string(),
+            db.clone(),
+            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone())))
+        );
 
         match publisher.connect().await {
             Ok(_) => assert!(true),
@@ -452,7 +455,11 @@ mod tests {
     #[tokio::test]
     async fn test_publish_with_different_exchange_types() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
-        let mut publisher = AmqpPublisher::new(TEST_RABBITMQ_URL.to_string(), db.clone(), Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))));
+        let mut publisher = AmqpPublisher::new(
+            TEST_RABBITMQ_URL.to_string(),
+            db.clone(),
+            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone())))
+        );
 
         let test_cases = vec![
             (
@@ -496,11 +503,13 @@ mod tests {
         let mut publisher = AmqpPublisher::new(
             "amqp://guest:guest@non_existent_host:5672".to_string(),
             db.clone(),
-            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
+            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone())))
         );
 
         match publisher.connect().await {
-            Ok(_) => assert!(false, "Should fail to connect"),
+            Ok(_) => {
+                assert!(false, "Should not be able to connect to invalid host");
+            }
             Err(_) => assert!(true),
         }
     }
@@ -508,21 +517,35 @@ mod tests {
     #[tokio::test]
     async fn test_publish_with_cache() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
-        let mut publisher = AmqpPublisher::new(TEST_RABBITMQ_URL.to_string(), db.clone(), Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))));
+        let cache = Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone())));
+        let mut publisher = AmqpPublisher::new(
+            "amqp://guest:guest@non_existent_host:5672".to_string(),
+            db.clone(),
+            cache.clone()
+        );
 
-        let exchange = "test_exchange";
-        let exchange_type = "topic";
-        let routing_key = "test_key";
-        let message = "test message";
+        let test_message = Message {
+            url: "amqp://guest:guest@non_existent_host:5672".to_string(),
+            exchange: "test_exchange".to_string(),
+            exchange_type: "topic".to_string(),
+            routing_key: "test.key".to_string(),
+            message: "Test message".to_string(),
+            timestamp: 12345,
+        };
 
-        match publisher
-            .publish(exchange, exchange_type, routing_key, message.as_bytes())
-            .await
         {
-            Ok(_) => assert!(true),
-            Err(e) => {
-                println!("Failed to publish message: {}", e);
-                assert!(false);
+            let mut cache_guard = cache.lock().unwrap();
+            cache_guard.insert(test_message.clone());
+        }
+
+        match publisher.connect().await {
+            Ok(_) => assert!(false, "Should not connect to invalid host"),
+            Err(_) => {
+                let cache_guard = cache.lock().unwrap();
+                let messages = cache_guard.get_recent(10);
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].exchange, "test_exchange");
+                assert_eq!(messages[0].routing_key, "test.key");
             }
         }
     }

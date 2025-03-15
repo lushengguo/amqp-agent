@@ -6,11 +6,8 @@ use tracing::{info, warn};
 
 pub struct MemoryCache {
     messages: BTreeMap<u32, Message>,
-
     current_size: usize,
-
     max_size: usize,
-
     db: Arc<Mutex<DB>>,
 }
 
@@ -117,12 +114,13 @@ mod tests {
             routing_key: routing_key.to_string(),
             message: message_content.to_string(),
             timestamp: base_timestamp + timestamp_offset,
+            exchange_type: "topic".to_string(),
         }
     }
 
     fn setup_test_cache(max_size: usize) -> (MemoryCache, Arc<Mutex<DB>>, String) {
         let db_path = format!("test_cache_db_{}.sqlite", rand::random::<u32>());
-        let db = DB::new_with_path(&db_path).unwrap();
+        let db = DB::new().unwrap();
         let db_arc = Arc::new(Mutex::new(db));
 
         let cache = MemoryCache::new(max_size, db_arc.clone());
@@ -290,7 +288,7 @@ mod tests {
         let start_db = std::time::Instant::now();
         {
             let mut db = db_arc.lock().unwrap();
-            db.batch_insert(&messages).unwrap();
+            (*db).batch_insert(&messages).unwrap();
         }
         let db_duration = start_db.elapsed();
 

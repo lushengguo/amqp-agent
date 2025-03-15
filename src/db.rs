@@ -154,6 +154,7 @@ mod tests {
         Message {
             url: "amqp://localhost:5672".to_string(),
             exchange: exchange.to_string(),
+            exchange_type: "direct".to_string(),
             routing_key: routing_key.to_string(),
             message: message_content.to_string(),
             timestamp,
