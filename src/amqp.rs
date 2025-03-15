@@ -411,6 +411,14 @@ impl AmqpConnectionManager {
         &mut self,
         url: String,
     ) -> Result<Arc<Mutex<AmqpPublisher>>> {
+        let (host, username, password, port) = AmqpPublisher::parse_amqp_url(&url)?;
+        if host.is_empty() || username.is_empty() || password.is_empty() || port == 0 {
+            return Err(Box::new(AmqpError::ChannelUseError(format!(
+                "Invalid AMQP URL {}",
+                url
+            ))) as Box<dyn Error + Send + Sync>);
+        }
+
         if let Some(publisher) = self.publishers.get(&url) {
             return Ok(publisher.clone());
         }
