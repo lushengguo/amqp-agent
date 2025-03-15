@@ -59,19 +59,9 @@ impl MessageStats {
             last_updated: Instant::now(),
         }
     }
-
-    fn to_report_tuple(&self) -> (String, String, String, u64, u64) {
-        (
-            self.url.clone(),
-            self.exchange.clone(),
-            self.routing_key.clone(),
-            self.total_sent,
-            self.total_success,
-        )
-    }
 }
 
-pub struct AmqpPublisher {
+pub struct AmqpProduceer {
     url: String,
     connection: Option<Connection>,
     channel: Option<Channel>,
@@ -81,7 +71,7 @@ pub struct AmqpPublisher {
     message_stats: HashMap<String, MessageStats>,
 }
 
-impl AmqpPublisher {
+impl AmqpProduceer {
     pub fn new(url: String, cache: Arc<StdMutex<MemoryCache>>) -> Self {
         Self {
             url,
@@ -219,7 +209,7 @@ impl AmqpPublisher {
         }
     }
 
-    pub async fn publish(
+    pub async fn produce(
         &mut self,
         exchange: &str,
         exchange_type: &str,
@@ -354,11 +344,12 @@ impl AmqpPublisher {
         let mut cache = self.cache.lock().unwrap();
         cache.insert(message);
         info!(
-            "Message cached successfully - Exchange: {} ({}), RoutingKey: {}, Current cache size: {} messages",
+            "Message cached successfully - Exchange: {} ({}), RoutingKey: {}, Current memory usage: {} bytes, cached {} messages",
             exchange,
             exchange_type_clone,
             routing_key,
-            cache.size()
+            cache.memory_usage(),
+            cache.message_count()
         );
         Ok(())
     }
@@ -375,7 +366,7 @@ impl AmqpPublisher {
         }
     }
 
-    pub async fn retry_cached_messages(&mut self) -> Result<()> {
+    pub async fn retry_message_count(&mut self) -> Result<()> {
         if !self.is_connected() {
             return Ok(());
         }
@@ -387,7 +378,7 @@ impl AmqpPublisher {
 
         for message in messages {
             match self
-                .publish(
+                .produce(
                     &message.exchange,
                     &message.exchange_type,
                     &message.routing_key,
@@ -414,29 +405,29 @@ impl AmqpPublisher {
         Ok(())
     }
 
-    pub async fn start_retry_task(publisher: Arc<Mutex<AmqpPublisher>>) {
+    pub async fn start_retry_task(producer: Arc<Mutex<AmqpProduceer>>) {
         tokio::spawn(async move {
             loop {
                 time::sleep(Duration::from_secs(5)).await;
-                let mut publisher = publisher.lock().await;
-                if let Err(e) = publisher.retry_cached_messages().await {
+                let mut producer = producer.lock().await;
+                if let Err(e) = producer.retry_message_count().await {
                     error!("Failed to retry cached messages: {}", e);
                 }
             }
         });
     }
 
-    pub async fn start_heartbeat_task(publisher: Arc<Mutex<AmqpPublisher>>) {
+    pub async fn start_heartbeat_task(producer: Arc<Mutex<AmqpProduceer>>) {
         tokio::spawn(async move {
             loop {
                 time::sleep(Duration::from_secs(15)).await;
-                let mut publisher = publisher.lock().await;
-                if !publisher.is_connected() {
-                    warn!("Heartbeat check failed, reconnecting to {}", publisher.url);
-                    if let Err(e) = publisher.connect().await {
+                let mut producer = producer.lock().await;
+                if !producer.is_connected() {
+                    warn!("Heartbeat check failed, reconnecting to {}", producer.url);
+                    if let Err(e) = producer.connect().await {
                         error!("Failed to reconnect: {}", e);
                     } else {
-                        info!("Reconnected to {}", publisher.url);
+                        info!("Reconnected to {}", producer.url);
                     }
                 }
             }
@@ -447,26 +438,49 @@ impl AmqpPublisher {
         format!("{}:{}", exchange, routing_key)
     }
 
-    pub fn generate_report(&self) -> Vec<(String, String, String, u64, u64)> {
+    pub fn generate_report(&self) -> Vec<PeriodProduceReport> {
         let now = Instant::now();
-        self.message_stats
-            .values()
-            .filter(|stats| now.duration_since(stats.last_updated) <= Duration::from_secs(60))
-            .map(|stats| stats.to_report_tuple())
-            .collect()
+        let mut report = Vec::new();
+        for stats in self.message_stats.values() {
+            if now.duration_since(stats.last_updated) < Duration::from_secs(60) {
+                report.push(PeriodProduceReport {
+                    url: stats.url.clone(),
+                    exchange: stats.exchange.clone(),
+                    routing_key: stats.routing_key.clone(),
+                    total_sent: stats.total_sent,
+                    total_success: stats.total_success,
+                });
+            }
+        }
+        report
     }
 }
 
 pub struct AmqpConnectionManager {
-    publishers: HashMap<String, Arc<Mutex<AmqpPublisher>>>,
+    producers: HashMap<String, Arc<Mutex<AmqpProduceer>>>,
     db: Arc<StdMutex<DB>>,
     cache: Arc<StdMutex<MemoryCache>>,
+}
+
+pub struct PeriodProduceReport {
+    pub url: String,
+    pub exchange: String,
+    pub routing_key: String,
+    pub total_sent: u64,
+    pub total_success: u64,
+}
+
+pub struct CacheReport {
+    pub in_memory_message_count: u64,
+    pub memory_usage: u64,
+    pub in_disk_message_count: u64,
+    pub disk_usage: u64,
 }
 
 impl AmqpConnectionManager {
     pub fn new(db: Arc<StdMutex<DB>>, cache: Arc<StdMutex<MemoryCache>>) -> Self {
         Self {
-            publishers: HashMap::new(),
+            producers: HashMap::new(),
             db,
             cache,
         }
@@ -476,11 +490,11 @@ impl AmqpConnectionManager {
         self.db.clone()
     }
 
-    pub async fn get_or_create_publisher(
+    pub async fn get_or_create_producer(
         &mut self,
         url: String,
-    ) -> Result<Arc<Mutex<AmqpPublisher>>> {
-        let (host, username, password, port) = AmqpPublisher::parse_amqp_url(&url)?;
+    ) -> Result<Arc<Mutex<AmqpProduceer>>> {
+        let (host, username, password, port) = AmqpProduceer::parse_amqp_url(&url)?;
         if host.is_empty() || username.is_empty() || password.is_empty() || port == 0 {
             return Err(Box::new(AmqpError::ChannelUseError(format!(
                 "Invalid AMQP URL {}",
@@ -488,31 +502,39 @@ impl AmqpConnectionManager {
             ))) as Box<dyn Error + Send + Sync>);
         }
 
-        if let Some(publisher) = self.publishers.get(&url) {
-            return Ok(publisher.clone());
+        if let Some(producer) = self.producers.get(&url) {
+            return Ok(producer.clone());
         }
 
-        let publisher = Arc::new(Mutex::new(AmqpPublisher::new(
+        let producer = Arc::new(Mutex::new(AmqpProduceer::new(
             url.clone(),
             self.cache.clone(),
         )));
 
-        AmqpPublisher::start_heartbeat_task(publisher.clone()).await;
-        AmqpPublisher::start_retry_task(publisher.clone()).await;
+        AmqpProduceer::start_heartbeat_task(producer.clone()).await;
+        AmqpProduceer::start_retry_task(producer.clone()).await;
 
-        self.publishers.insert(url, publisher.clone());
-        Ok(publisher)
+        self.producers.insert(url, producer.clone());
+        Ok(producer)
     }
 
-    pub async fn generate_reports(&self) -> Vec<(String, String, String, u64, u64)> {
-        let mut all_reports = Vec::new();
+    pub async fn generate_reports(&self) -> (Vec<PeriodProduceReport>, CacheReport) {
+        let mut produce_report = Vec::new();
 
-        for publisher in self.publishers.values() {
-            let publisher_guard = publisher.lock().await;
-            all_reports.extend(publisher_guard.generate_report());
+        for producer in self.producers.values() {
+            let producer_guard = producer.lock().await;
+            produce_report.extend(producer_guard.generate_report());
         }
 
-        all_reports
+        (
+            produce_report,
+            CacheReport {
+                in_memory_message_count: self.cache.lock().unwrap().message_count() as u64,
+                memory_usage: self.cache.lock().unwrap().memory_usage() as u64,
+                in_disk_message_count: self.db.lock().unwrap().message_count().unwrap() as u64,
+                disk_usage: self.db.lock().unwrap().disk_usage().unwrap() as u64,
+            },
+        )
     }
 }
 
@@ -525,12 +547,12 @@ mod tests {
     #[tokio::test]
     async fn test_connect_to_local_rabbitmq() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
-        let mut publisher = AmqpPublisher::new(
+        let mut producer = AmqpProduceer::new(
             TEST_RABBITMQ_URL.to_string(),
             Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
         );
 
-        match publisher.connect().await {
+        match producer.connect().await {
             Ok(_) => assert!(true),
             Err(e) => {
                 println!("Failed to connect to local RabbitMQ: {}", e);
@@ -540,9 +562,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_publish_with_different_exchange_types() {
+    async fn test_produce_with_different_exchange_types() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
-        let mut publisher = AmqpPublisher::new(
+        let mut producer = AmqpProduceer::new(
             TEST_RABBITMQ_URL.to_string(),
             Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
         );
@@ -564,8 +586,8 @@ mod tests {
         ];
 
         for (exchange, ex_type, routing_key, message) in test_cases {
-            match publisher
-                .publish(exchange, ex_type, routing_key, message.as_bytes(), false)
+            match producer
+                .produce(exchange, ex_type, routing_key, message.as_bytes(), false)
                 .await
             {
                 Ok(_) => {
@@ -586,12 +608,12 @@ mod tests {
     #[tokio::test]
     async fn test_connect_to_invalid_host() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
-        let mut publisher = AmqpPublisher::new(
+        let mut producer = AmqpProduceer::new(
             "amqp://guest:guest@non_existent_host:5672".to_string(),
             Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
         );
 
-        match publisher.connect().await {
+        match producer.connect().await {
             Ok(_) => {
                 assert!(false, "Should not be able to connect to invalid host");
             }
@@ -600,10 +622,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_publish_with_cache() {
+    async fn test_produce_with_cache() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
         let cache = Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone())));
-        let mut publisher = AmqpPublisher::new(
+        let mut producer = AmqpProduceer::new(
             "amqp://guest:guest@non_existent_host:5672".to_string(),
             cache.clone(),
         );
@@ -622,7 +644,7 @@ mod tests {
             cache_guard.insert(test_message.clone());
         }
 
-        match publisher.connect().await {
+        match producer.connect().await {
             Ok(_) => assert!(false, "Should not connect to invalid host"),
             Err(_) => {
                 let cache_guard = cache.lock().unwrap();
@@ -637,14 +659,14 @@ mod tests {
     #[tokio::test]
     async fn test_message_stats() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
-        let mut publisher = AmqpPublisher::new(
+        let mut producer = AmqpProduceer::new(
             TEST_RABBITMQ_URL.to_string(),
             Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
         );
 
         // Send a test message
-        let result = publisher
-            .publish(
+        let result = producer
+            .produce(
                 "test_exchange",
                 "topic",
                 "test.key",
@@ -654,11 +676,17 @@ mod tests {
             .await;
 
         // Get the report
-        let report = publisher.generate_report();
+        let report = producer.generate_report();
 
         // Check if stats were recorded
         assert!(!report.is_empty());
-        let (url, exchange, routing_key, total_sent, total_success) = &report[0];
+        let PeriodProduceReport {
+            url,
+            exchange,
+            routing_key,
+            total_sent,
+            total_success,
+        } = &report[0];
         assert_eq!(url, TEST_RABBITMQ_URL);
         assert_eq!(exchange, "test_exchange");
         assert_eq!(routing_key, "test.key");

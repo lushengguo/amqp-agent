@@ -43,13 +43,6 @@ impl StatsKey {
             routing_key,
         }
     }
-
-    fn to_string(&self) -> String {
-        format!(
-            "[{}] [{}:{}]",
-            self.ip_port, self.exchange, self.routing_key
-        )
-    }
 }
 
 lazy_static::lazy_static! {
@@ -73,56 +66,18 @@ async fn update_stats(url: &str, exchange: &str, routing_key: &str) {
     entry.timestamp = SystemTime::now();
 }
 
-async fn start_stats_reporter() {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            let mut stats = MESSAGE_STATS.lock().await;
-
-            let mut report = String::new();
-            report.push_str("\nMessage statistics for the last 60 seconds:\n");
-
-            let mut active_stats: Vec<(String, u64)> = stats
-                .iter()
-                .filter(|(_, stats)| {
-                    stats.timestamp.elapsed().unwrap_or(Duration::from_secs(61))
-                        <= Duration::from_secs(60)
-                })
-                .map(|(key, stats)| (key.to_string(), stats.count))
-                .collect();
-
-            active_stats.sort_by(|a, b| b.1.cmp(&a.1));
-
-            for (key, count) in active_stats {
-                report.push_str(&format!("{}: {} messages\n", key, count));
-            }
-
-            stats.retain(|_, stats| {
-                stats.timestamp.elapsed().unwrap_or(Duration::from_secs(61))
-                    <= Duration::from_secs(60)
-            });
-
-            if !report.contains("messages") {
-                report.push_str("No messages sent in the last 60 seconds\n");
-            }
-
-            info!("{}", report);
-        }
-    });
-}
-
-async fn start_publisher_background_tasks() {
+async fn start_producer_background_tasks() {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            if let Err(e) = retry_cached_messages().await {
+            if let Err(e) = retry_message_count().await {
                 error!("Failed to retry cached messages: {}", e);
             }
         }
     });
 }
 
-async fn retry_cached_messages() -> Result<()> {
+async fn retry_message_count() -> Result<()> {
     let mut manager = CONNECTION_MANAGER.lock().await;
     let messages = {
         let db = manager.get_db();
@@ -131,11 +86,11 @@ async fn retry_cached_messages() -> Result<()> {
     };
 
     for message in messages {
-        match manager.get_or_create_publisher(message.url.clone()).await {
-            Ok(publisher) => {
-                let mut publisher = publisher.lock().await;
-                if let Err(e) = publisher
-                    .publish(
+        match manager.get_or_create_producer(message.url.clone()).await {
+            Ok(producer) => {
+                let mut producer = producer.lock().await;
+                if let Err(e) = producer
+                    .produce(
                         &message.exchange,
                         &message.exchange_type,
                         &message.routing_key,
@@ -148,14 +103,14 @@ async fn retry_cached_messages() -> Result<()> {
                 }
             }
             Err(e) => {
-                error!("Failed to get publisher: {}", e);
+                error!("Failed to get producer: {}", e);
             }
         }
     }
     Ok(())
 }
 
-async fn publish_message(
+async fn produce_message(
     url: String,
     exchange: String,
     exchange_type: String,
@@ -163,11 +118,11 @@ async fn publish_message(
     message: String,
 ) -> Result<()> {
     let mut manager = CONNECTION_MANAGER.lock().await;
-    let publisher = manager.get_or_create_publisher(url.clone()).await?;
-    let mut publisher = publisher.lock().await;
+    let producer = manager.get_or_create_producer(url.clone()).await?;
+    let mut producer = producer.lock().await;
     update_stats(&url, &exchange, &routing_key).await;
-    publisher
-        .publish(
+    producer
+        .produce(
             &exchange,
             &exchange_type,
             &routing_key,
@@ -191,7 +146,7 @@ async fn process_connection(mut stream: TcpStream) -> Result<()> {
 
         match serde_json::from_str::<Message>(line.trim()) {
             Ok(message) => {
-                if let Err(e) = publish_message(
+                if let Err(e) = produce_message(
                     message.url.clone(),
                     message.exchange.clone(),
                     message.exchange_type.clone(),
@@ -200,7 +155,7 @@ async fn process_connection(mut stream: TcpStream) -> Result<()> {
                 )
                 .await
                 {
-                    error!("Failed to publish message to RabbitMQ: {}", e);
+                    error!("Failed to produce message to RabbitMQ: {}", e);
                 }
             }
             Err(e) => {
@@ -216,14 +171,23 @@ async fn start_report_task() {
         loop {
             time::sleep(Duration::from_secs(60)).await;
             let manager = CONNECTION_MANAGER.lock().await;
-            let reports = manager.generate_reports().await;
-            
-            for (url, exchange, routing_key, total_sent, total_success) in reports {
+            let (produce_reports, cache_report) = manager.generate_reports().await;
+
+            for report in produce_reports {
                 info!(
-                    "消息统计 - URL: {}, Exchange: {}, RoutingKey: {}, 发送总量: {}, 成功数量: {}",
-                    url, exchange, routing_key, total_sent, total_success
+                    "PRODUCE REPORT - url:{}, exchange:{}, routingkey:{}, produceed:{}, succeed:{}",
+                    report.url,
+                    report.exchange,
+                    report.routing_key,
+                    report.total_sent,
+                    report.total_success
                 );
             }
+
+            info!(
+                "CACHE REPORT - memory cached {} messages, memory usage: {},  disk cached {} messages, disk usage: {}",
+                cache_report.in_memory_message_count, cache_report.memory_usage,  cache_report.in_disk_message_count, cache_report.disk_usage
+            );
         }
     });
 }
@@ -236,8 +200,7 @@ async fn main() -> Result<()> {
 
     logger::start_log_cleaner(settings.log.clone());
 
-    start_publisher_background_tasks().await;
-    start_stats_reporter().await;
+    start_producer_background_tasks().await;
     start_report_task().await;
 
     let addr = format!("{}:{}", settings.server.host, settings.server.port);

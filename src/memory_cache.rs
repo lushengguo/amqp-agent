@@ -25,6 +25,10 @@ impl MemoryCache {
         }
     }
 
+    pub fn message_count(&self) -> u64 {
+        self.messages.len() as u64
+    }
+
     fn calculate_message_size(message: &Message) -> usize {
         message.url.len()
             + message.exchange.len()
@@ -101,7 +105,7 @@ impl MemoryCache {
         result
     }
 
-    pub fn size(&self) -> usize {
+    pub fn memory_usage(&self) -> usize {
         self.current_size
     }
 
@@ -158,7 +162,7 @@ mod tests {
     fn test_cache_creation() {
         let (cache, _, db_path) = setup_test_cache(10);
 
-        assert_eq!(cache.size(), 0);
+        assert_eq!(cache.memory_usage(), 0);
 
         assert!(cache.messages.is_empty());
 
@@ -174,7 +178,7 @@ mod tests {
         let msg_size = MemoryCache::calculate_message_size(&message);
         cache.insert(message);
 
-        assert_eq!(cache.size(), msg_size);
+        assert_eq!(cache.memory_usage(), msg_size);
         assert!(cache.messages.contains_key(&timestamp));
 
         let recent_messages = cache.get_recent(10);
@@ -226,13 +230,13 @@ mod tests {
         let msg_size = MemoryCache::calculate_message_size(&message);
         cache.insert(message);
 
-        assert_eq!(cache.size(), msg_size);
+        assert_eq!(cache.memory_usage(), msg_size);
 
         let removed = cache.remove(timestamp);
         assert!(removed.is_some());
         assert_eq!(removed.unwrap().routing_key, "test_key");
 
-        assert_eq!(cache.size(), 0);
+        assert_eq!(cache.memory_usage(), 0);
         assert_eq!(cache.get_recent(10).len(), 0);
 
         let not_found = cache.remove(12345);
@@ -257,7 +261,7 @@ mod tests {
         cache.insert(message2);
         cache.insert(message3);
 
-        assert_eq!(cache.size(), total_size);
+        assert_eq!(cache.memory_usage(), total_size);
 
         let messages = cache.get_recent(10);
         assert_eq!(messages.len(), 3);
@@ -363,7 +367,7 @@ mod tests {
 
         {
             let cache = cache_arc.lock().unwrap();
-            assert_eq!(cache.size(), total_size);
+            assert_eq!(cache.memory_usage(), total_size);
         }
 
         cleanup_test_resources(&db_path);

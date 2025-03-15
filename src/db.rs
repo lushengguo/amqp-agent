@@ -1,5 +1,6 @@
 use super::models::Message;
 use rusqlite::{params, Connection, Result};
+use std::fs;
 
 pub struct DB {
     conn: Connection,
@@ -23,6 +24,18 @@ impl DB {
             [],
         )?;
         Ok(Self { conn })
+    }
+
+    pub fn message_count(&self) -> Result<u64> {
+        let mut stmt = self.conn.prepare("SELECT COUNT(*) FROM messages")?;
+        let count: u64 = stmt.query_row([], |row| row.get(0))?;
+        Ok(count)
+    }
+
+    pub fn disk_usage(&self) -> Result<u64> {
+        fs::metadata("messages.db")
+            .map(|metadata| metadata.len())
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
     }
 
     pub fn batch_insert(&mut self, messages: &[Message]) -> Result<()> {
@@ -181,8 +194,8 @@ mod tests {
         let result = db.batch_insert(&messages);
         assert!(result.is_ok());
 
-        let stored_messages = db.get_recent_messages(10).unwrap();
-        assert_eq!(stored_messages.len(), 3);
+        let message_count = db.get_recent_messages(10).unwrap();
+        assert_eq!(message_count.len(), 3);
 
         cleanup_test_db(&db_path);
     }
