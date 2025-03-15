@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     net::{TcpListener, TcpStream},
+    time,
 };
 use tracing::{debug, error, info, warn};
 
@@ -210,6 +211,23 @@ async fn process_connection(mut stream: TcpStream) -> Result<()> {
     Ok(())
 }
 
+async fn start_report_task() {
+    tokio::spawn(async move {
+        loop {
+            time::sleep(Duration::from_secs(60)).await;
+            let manager = CONNECTION_MANAGER.lock().await;
+            let reports = manager.generate_reports().await;
+            
+            for (url, exchange, routing_key, total_sent, total_success) in reports {
+                info!(
+                    "消息统计 - URL: {}, Exchange: {}, RoutingKey: {}, 发送总量: {}, 成功数量: {}",
+                    url, exchange, routing_key, total_sent, total_success
+                );
+            }
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let settings = config::Settings::new()?;
@@ -220,6 +238,7 @@ async fn main() -> Result<()> {
 
     start_publisher_background_tasks().await;
     start_stats_reporter().await;
+    start_report_task().await;
 
     let addr = format!("{}:{}", settings.server.host, settings.server.port);
     let listener = TcpListener::bind(&addr).await?;

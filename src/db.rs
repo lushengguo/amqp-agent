@@ -72,31 +72,6 @@ impl DB {
         Ok(messages)
     }
 
-    pub fn get_messages_by_exchange(&self, exchange: &str, limit: u64) -> Result<Vec<Message>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT url, exchange, routing_key, message, timestamp, exchange_type 
-             FROM messages 
-             WHERE exchange = ?
-             ORDER BY timestamp DESC, created_at DESC 
-             LIMIT ?",
-        )?;
-
-        let messages = stmt
-            .query_map(params![exchange, limit], |row| {
-                Ok(Message {
-                    url: row.get(0)?,
-                    exchange: row.get(1)?,
-                    routing_key: row.get(2)?,
-                    message: row.get(3)?,
-                    timestamp: row.get(4)?,
-                    exchange_type: row.get(5)?,
-                })
-            })?
-            .collect::<Result<Vec<Message>>>()?;
-
-        Ok(messages)
-    }
-
     #[cfg(test)]
     fn clear_all(&self) -> Result<()> {
         self.conn.execute("DELETE FROM messages", [])?;
@@ -243,42 +218,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_messages_by_exchange() {
-        let (mut db, db_path) = setup_test_db();
-
-        let messages = vec![
-            create_test_message("exchange1", "key1", "Message for exchange1 (1)"),
-            create_test_message("exchange2", "key1", "Message for exchange2 (1)"),
-            create_test_message("exchange1", "key2", "Message for exchange1 (2)"),
-            create_test_message("exchange2", "key2", "Message for exchange2 (2)"),
-            create_test_message("exchange3", "key1", "Message for exchange3"),
-        ];
-
-        db.batch_insert(&messages).unwrap();
-
-        let exchange1_messages = db.get_messages_by_exchange("exchange1", 10).unwrap();
-        assert_eq!(exchange1_messages.len(), 2);
-        for msg in exchange1_messages {
-            assert_eq!(msg.exchange, "exchange1");
-        }
-
-        let exchange2_messages = db.get_messages_by_exchange("exchange2", 10).unwrap();
-        assert_eq!(exchange2_messages.len(), 2);
-        for msg in exchange2_messages {
-            assert_eq!(msg.exchange, "exchange2");
-        }
-
-        let exchange3_messages = db.get_messages_by_exchange("exchange3", 10).unwrap();
-        assert_eq!(exchange3_messages.len(), 1);
-        assert_eq!(exchange3_messages[0].exchange, "exchange3");
-
-        let non_existent_messages = db.get_messages_by_exchange("non_existent", 10).unwrap();
-        assert_eq!(non_existent_messages.len(), 0);
-
-        cleanup_test_db(&db_path);
-    }
-
-    #[test]
     fn test_clear_all() {
         let (mut db, db_path) = setup_test_db();
 
@@ -366,11 +305,26 @@ mod tests {
 
         db.batch_insert(&messages).unwrap();
 
-        let limited_messages = db.get_messages_by_exchange("same_exchange", 5).unwrap();
-        assert_eq!(limited_messages.len(), 5);
+        let all_messages = db.get_recent_messages(100).unwrap();
+        let same_exchange_messages: Vec<_> = all_messages
+            .into_iter()
+            .filter(|msg| msg.exchange == "same_exchange")
+            .take(5)
+            .collect();
 
-        let all_messages = db.get_messages_by_exchange("same_exchange", 100).unwrap();
-        assert_eq!(all_messages.len(), 20);
+        assert_eq!(same_exchange_messages.len(), 5);
+        for msg in &same_exchange_messages {
+            assert_eq!(msg.exchange, "same_exchange");
+        }
+
+        let all_same_exchange_messages: Vec<_> = db
+            .get_recent_messages(100)
+            .unwrap()
+            .into_iter()
+            .filter(|msg| msg.exchange == "same_exchange")
+            .collect();
+
+        assert_eq!(all_same_exchange_messages.len(), 20);
 
         cleanup_test_db(&db_path);
     }
@@ -460,9 +414,12 @@ mod tests {
             assert_eq!(all_messages.len(), 100);
 
             for thread_id in 0..5 {
-                let thread_messages = db_ref
-                    .get_messages_by_exchange(&format!("thread_{}", thread_id), 100)
-                    .unwrap();
+                let thread_messages: Vec<_> = db_ref
+                    .get_recent_messages(100)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|msg| msg.exchange == format!("thread_{}", thread_id))
+                    .collect();
                 assert_eq!(thread_messages.len(), 20);
             }
         }

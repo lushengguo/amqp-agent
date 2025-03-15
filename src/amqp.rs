@@ -38,6 +38,39 @@ lazy_static::lazy_static! {
     };
 }
 
+#[derive(Debug, Clone)]
+struct MessageStats {
+    url: String,
+    exchange: String,
+    routing_key: String,
+    total_sent: u64,
+    total_success: u64,
+    last_updated: Instant,
+}
+
+impl MessageStats {
+    fn new(url: String, exchange: String, routing_key: String) -> Self {
+        Self {
+            url,
+            exchange,
+            routing_key,
+            total_sent: 0,
+            total_success: 0,
+            last_updated: Instant::now(),
+        }
+    }
+
+    fn to_report_tuple(&self) -> (String, String, String, u64, u64) {
+        (
+            self.url.clone(),
+            self.exchange.clone(),
+            self.routing_key.clone(),
+            self.total_sent,
+            self.total_success,
+        )
+    }
+}
+
 pub struct AmqpPublisher {
     url: String,
     connection: Option<Connection>,
@@ -45,6 +78,7 @@ pub struct AmqpPublisher {
     last_heartbeat: Option<Instant>,
     cache: Arc<StdMutex<MemoryCache>>,
     declared_exchanges: HashMap<String, ExchangeType>,
+    message_stats: HashMap<String, MessageStats>,
 }
 
 impl AmqpPublisher {
@@ -56,6 +90,7 @@ impl AmqpPublisher {
             last_heartbeat: None,
             cache,
             declared_exchanges: HashMap::new(),
+            message_stats: HashMap::new(),
         }
     }
 
@@ -128,8 +163,6 @@ impl AmqpPublisher {
                 return Ok(());
             }
 
-            self.clear_connection_state();
-
             let mut retries = 0;
             while retries < MAX_CONNECT_RETRIES {
                 match self.do_connect().await {
@@ -194,7 +227,22 @@ impl AmqpPublisher {
         message: &[u8],
         is_retry: bool,
     ) -> Result<()> {
-        if !self.is_connected().await {
+        // Update message stats
+        let stats_key = Self::get_stats_key(exchange, routing_key);
+        let stats = self
+            .message_stats
+            .entry(stats_key.clone())
+            .or_insert_with(|| {
+                MessageStats::new(
+                    self.url.clone(),
+                    exchange.to_string(),
+                    routing_key.to_string(),
+                )
+            });
+        stats.total_sent += 1;
+        stats.last_updated = Instant::now();
+
+        if !self.is_connected() {
             self.connect().await?;
         }
 
@@ -248,6 +296,10 @@ impl AmqpPublisher {
                     message.len()
                 );
                 self.last_heartbeat = Some(Instant::now());
+                // Update success count in stats
+                if let Some(stats) = self.message_stats.get_mut(&stats_key) {
+                    stats.total_success += 1;
+                }
                 Ok(())
             }
             Err(e) => {
@@ -311,10 +363,10 @@ impl AmqpPublisher {
         Ok(())
     }
 
-    pub async fn is_connected(&self) -> bool {
+    pub fn is_connected(&mut self) -> bool {
         if let Some(last_heartbeat) = self.last_heartbeat {
             if last_heartbeat.elapsed() > Duration::from_secs(30) {
-                warn!("Heartbeat check failed, reconnecting");
+                self.clear_connection_state();
                 return false;
             }
             true
@@ -324,7 +376,7 @@ impl AmqpPublisher {
     }
 
     pub async fn retry_cached_messages(&mut self) -> Result<()> {
-        if !self.is_connected().await {
+        if !self.is_connected() {
             return Ok(());
         }
 
@@ -379,13 +431,29 @@ impl AmqpPublisher {
             loop {
                 time::sleep(Duration::from_secs(15)).await;
                 let mut publisher = publisher.lock().await;
-                if !publisher.is_connected().await {
+                if !publisher.is_connected() {
+                    warn!("Heartbeat check failed, reconnecting to {}", publisher.url);
                     if let Err(e) = publisher.connect().await {
                         error!("Failed to reconnect: {}", e);
+                    } else {
+                        info!("Reconnected to {}", publisher.url);
                     }
                 }
             }
         });
+    }
+
+    fn get_stats_key(exchange: &str, routing_key: &str) -> String {
+        format!("{}:{}", exchange, routing_key)
+    }
+
+    pub fn generate_report(&self) -> Vec<(String, String, String, u64, u64)> {
+        let now = Instant::now();
+        self.message_stats
+            .values()
+            .filter(|stats| now.duration_since(stats.last_updated) <= Duration::from_secs(60))
+            .map(|stats| stats.to_report_tuple())
+            .collect()
     }
 }
 
@@ -434,6 +502,17 @@ impl AmqpConnectionManager {
 
         self.publishers.insert(url, publisher.clone());
         Ok(publisher)
+    }
+
+    pub async fn generate_reports(&self) -> Vec<(String, String, String, u64, u64)> {
+        let mut all_reports = Vec::new();
+
+        for publisher in self.publishers.values() {
+            let publisher_guard = publisher.lock().await;
+            all_reports.extend(publisher_guard.generate_report());
+        }
+
+        all_reports
     }
 }
 
@@ -553,5 +632,37 @@ mod tests {
                 assert_eq!(messages[0].routing_key, "test.key");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_message_stats() {
+        let db = Arc::new(StdMutex::new(DB::new().unwrap()));
+        let mut publisher = AmqpPublisher::new(
+            TEST_RABBITMQ_URL.to_string(),
+            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
+        );
+
+        // Send a test message
+        let result = publisher
+            .publish(
+                "test_exchange",
+                "topic",
+                "test.key",
+                "Test message".as_bytes(),
+                false,
+            )
+            .await;
+
+        // Get the report
+        let report = publisher.generate_report();
+
+        // Check if stats were recorded
+        assert!(!report.is_empty());
+        let (url, exchange, routing_key, total_sent, total_success) = &report[0];
+        assert_eq!(url, TEST_RABBITMQ_URL);
+        assert_eq!(exchange, "test_exchange");
+        assert_eq!(routing_key, "test.key");
+        assert_eq!(*total_sent, 1);
+        assert_eq!(*total_success, result.is_ok() as u64);
     }
 }
