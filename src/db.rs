@@ -323,11 +323,12 @@ mod tests {
         {
             let tx = db.conn.transaction().unwrap();
             tx.execute(
-                "INSERT INTO messages (url, exchange, routing_key, message, timestamp) 
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO messages (url, exchange, exchange_type, routing_key, message, timestamp) 
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     "amqp://localhost:5672",
                     "test_exchange",
+                    "topic",
                     "test_key",
                     "Transaction test message",
                     1000u32
@@ -343,11 +344,12 @@ mod tests {
         {
             let tx = db.conn.transaction().unwrap();
             tx.execute(
-                "INSERT INTO messages (url, exchange, routing_key, message, timestamp) 
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO messages (url, exchange, exchange_type, routing_key, message, timestamp) 
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     "amqp://localhost:5672",
                     "test_exchange",
+                    "topic",
                     "test_key",
                     "This message should not be committed",
                     2000u32

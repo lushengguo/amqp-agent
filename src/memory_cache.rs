@@ -13,6 +13,10 @@ pub struct MemoryCache {
 
 impl MemoryCache {
     pub fn new(max_size: usize, db: Arc<Mutex<DB>>) -> Self {
+        if max_size == 0 {
+            panic!("Max size must be greater than 0");
+        }
+
         Self {
             messages: BTreeMap::new(),
             current_size: 0,
@@ -21,14 +25,23 @@ impl MemoryCache {
         }
     }
 
+    fn calculate_message_size(message: &Message) -> usize {
+        message.url.len()
+            + message.exchange.len()
+            + message.exchange_type.len()
+            + message.routing_key.len()
+            + message.message.len()
+            + std::mem::size_of::<u32>() // timestamp size
+    }
+
     pub fn insert(&mut self, message: Message) {
-        if self.current_size >= self.max_size {
+        let timestamp = message.timestamp;
+        self.current_size += Self::calculate_message_size(&message);
+        self.messages.insert(timestamp, message);
+
+        while self.current_size >= self.max_size {
             self.flush_oldest_to_db();
         }
-
-        let timestamp = message.timestamp;
-        self.messages.insert(timestamp, message);
-        self.current_size += 1;
     }
 
     fn flush_oldest_to_db(&mut self) {
@@ -52,7 +65,7 @@ impl MemoryCache {
 
                 for timestamp in to_remove {
                     self.messages.remove(&timestamp);
-                    self.current_size -= 1;
+                    self.current_size -= Self::calculate_message_size(&to_db[0]);
                 }
             }
         }
@@ -120,11 +133,9 @@ mod tests {
 
     fn setup_test_cache(max_size: usize) -> (MemoryCache, Arc<Mutex<DB>>, String) {
         let db_path = format!("test_cache_db_{}.sqlite", rand::random::<u32>());
-        let db = DB::new().unwrap();
+        let db = DB::new_with_path(&db_path).unwrap();
         let db_arc = Arc::new(Mutex::new(db));
-
         let cache = MemoryCache::new(max_size, db_arc.clone());
-
         (cache, db_arc, db_path)
     }
 
@@ -165,25 +176,30 @@ mod tests {
 
     #[test]
     fn test_cache_overflow() {
-        let (mut cache, db_arc, db_path) = setup_test_cache(5);
+        let (mut cache, db_arc, db_path) = setup_test_cache(100);
 
         for i in 0..6 {
             let message = create_test_message(
                 "test_exchange",
                 &format!("key_{}", i),
-                &format!("Message {}", i),
+                &format!(
+                    "This is message number {} with some extra padding to make it larger",
+                    i
+                ),
                 i,
             );
+            let msg_size = MemoryCache::calculate_message_size(&message);
             cache.insert(message);
+            println!("Inserted message size: {} bytes", msg_size);
         }
 
-        assert_eq!(cache.size(), 5);
+        assert!(cache.current_size <= cache.max_size);
 
         {
             let db = db_arc.lock().unwrap();
             let db_messages = db.get_recent_messages(10).unwrap();
-            assert_eq!(db_messages.len(), 1);
-            assert_eq!(db_messages[0].routing_key, "key_0");
+            assert!(!db_messages.is_empty());
+            assert!(db_messages.iter().any(|m| m.routing_key.contains("key_0")));
         }
 
         cleanup_test_resources(&db_path);
@@ -356,37 +372,48 @@ mod tests {
 
     #[test]
     fn test_automatic_flush_to_db() {
-        let (mut cache, db_arc, db_path) = setup_test_cache(4);
+        let (mut cache, db_arc, db_path) = setup_test_cache(400);
 
         for i in 0..4 {
-            cache.insert(create_test_message(
+            let message = create_test_message(
                 "test_exchange",
                 &format!("key_{}", i),
-                &format!("Message {}", i),
+                &format!(
+                    "This is test message {} with additional content to make it larger",
+                    i
+                ),
                 i,
-            ));
+            );
+            let msg_size = MemoryCache::calculate_message_size(&message);
+            cache.insert(message);
+            println!("Inserted message size: {} bytes", msg_size);
         }
 
-        assert_eq!(cache.size(), 4);
-        {
-            let db = db_arc.lock().unwrap();
-            assert_eq!(db.get_recent_messages(10).unwrap().len(), 0);
-        }
-
-        cache.insert(create_test_message(
-            "test_exchange",
-            "key_trigger",
-            "This message triggers flush",
-            100,
-        ));
-
-        assert_eq!(cache.size(), 4);
+        assert!(cache.current_size <= cache.max_size);
 
         {
             let db = db_arc.lock().unwrap();
             let db_messages = db.get_recent_messages(10).unwrap();
-            assert_eq!(db_messages.len(), 1);
-            assert_eq!(db_messages[0].routing_key, "key_0");
+            assert_eq!(db_messages.len(), 0);
+        }
+
+        let trigger_message = create_test_message(
+            "test_exchange",
+            "key_trigger",
+            "This message should trigger a flush to database with extra content",
+            100,
+        );
+        let trigger_size = MemoryCache::calculate_message_size(&trigger_message);
+        println!("Trigger message size: {} bytes", trigger_size);
+        cache.insert(trigger_message);
+
+        assert!(cache.current_size <= cache.max_size);
+
+        {
+            let db = db_arc.lock().unwrap();
+            let db_messages = db.get_recent_messages(10).unwrap();
+            assert!(!db_messages.is_empty());
+            assert!(db_messages.iter().any(|m| m.routing_key == "key_0"));
         }
 
         cleanup_test_resources(&db_path);
