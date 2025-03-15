@@ -25,22 +25,6 @@ impl DB {
         Ok(Self { conn })
     }
 
-    pub fn insert(&mut self, message: &Message) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO messages (url, exchange, exchange_type, routing_key, message, timestamp) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                message.url,
-                message.exchange,
-                message.exchange_type,
-                message.routing_key,
-                message.message,
-                message.timestamp
-            ],
-        )?;
-        Ok(())
-    }
-
     pub fn batch_insert(&mut self, messages: &[Message]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
@@ -197,7 +181,7 @@ mod tests {
 
         let message = create_test_message("test_exchange", "test_key", "Hello, world!");
 
-        let result = db.insert(&message);
+        let result = db.batch_insert(&[message]);
         assert!(result.is_ok());
 
         let messages = db.get_recent_messages(10).unwrap();
@@ -412,7 +396,7 @@ mod tests {
 
         let start_individual = std::time::Instant::now();
         for message in &messages {
-            db.insert(message).unwrap();
+            db.batch_insert(&[message.clone()]).unwrap();
         }
         let individual_duration = start_individual.elapsed();
 

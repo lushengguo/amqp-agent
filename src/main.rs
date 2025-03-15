@@ -81,7 +81,6 @@ async fn start_stats_reporter() {
             let mut report = String::new();
             report.push_str("\nMessage statistics for the last 60 seconds:\n");
 
-            // Filter and collect stats for the last 60 seconds
             let mut active_stats: Vec<(String, u64)> = stats
                 .iter()
                 .filter(|(_, stats)| {
@@ -91,14 +90,12 @@ async fn start_stats_reporter() {
                 .map(|(key, stats)| (key.to_string(), stats.count))
                 .collect();
 
-            // Sort by message count
             active_stats.sort_by(|a, b| b.1.cmp(&a.1));
 
             for (key, count) in active_stats {
                 report.push_str(&format!("{}: {} messages\n", key, count));
             }
 
-            // Clear old entries
             stats.retain(|_, stats| {
                 stats.timestamp.elapsed().unwrap_or(Duration::from_secs(61))
                     <= Duration::from_secs(60)
@@ -169,7 +166,13 @@ async fn publish_message(
     let mut publisher = publisher.lock().await;
     update_stats(&url, &exchange, &routing_key).await;
     publisher
-        .publish(&exchange, &exchange_type, &routing_key, message.as_bytes(), false)
+        .publish(
+            &exchange,
+            &exchange_type,
+            &routing_key,
+            message.as_bytes(),
+            false,
+        )
         .await
 }
 

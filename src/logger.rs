@@ -5,13 +5,12 @@ use std::time::Duration;
 use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
-    fmt::writer::MakeWriterExt,
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
-    EnvFilter,
+    fmt::writer::MakeWriterExt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
 };
 
-pub fn init_logger(config: &LogSettings) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn init_logger(
+    config: &LogSettings,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let level = match config.level.to_lowercase().as_str() {
         "trace" => Level::TRACE,
         "debug" => Level::DEBUG,
@@ -21,18 +20,14 @@ pub fn init_logger(config: &LogSettings) -> std::result::Result<(), Box<dyn std:
         _ => Level::INFO,
     };
 
-    let file_appender = RollingFileAppender::new(
-        Rotation::DAILY,
-        &config.dir,
-        "app.log",
-    );
+    let file_appender = RollingFileAppender::new(Rotation::DAILY, &config.dir, "app.log");
 
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_writer(non_blocking.with_max_level(level));
+    let file_layer =
+        tracing_subscriber::fmt::layer().with_writer(non_blocking.with_max_level(level));
 
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stdout.with_max_level(level));
+    let stdout_layer =
+        tracing_subscriber::fmt::layer().with_writer(std::io::stdout.with_max_level(level));
 
     tracing_subscriber::registry()
         .with(EnvFilter::from_default_env().add_directive(level.into()))
@@ -54,7 +49,9 @@ pub fn start_log_cleaner(config: LogSettings) {
     });
 }
 
-async fn clean_old_logs(config: &LogSettings) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn clean_old_logs(
+    config: &LogSettings,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let log_dir = Path::new(&config.dir);
     if !log_dir.exists() {
         return Ok(());
@@ -64,9 +61,7 @@ async fn clean_old_logs(config: &LogSettings) -> std::result::Result<(), Box<dyn
     let max_files = config.max_files;
     let mut files: Vec<_> = entries
         .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry.path().extension().map_or(false, |ext| ext == "log")
-        })
+        .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "log"))
         .collect();
 
     if files.len() <= max_files as usize {

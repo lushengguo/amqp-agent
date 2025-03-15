@@ -31,7 +31,7 @@ impl MemoryCache {
             + message.exchange_type.len()
             + message.routing_key.len()
             + message.message.len()
-            + std::mem::size_of::<u32>() // timestamp size
+            + std::mem::size_of::<u32>()
     }
 
     pub fn insert(&mut self, message: Message) {
@@ -72,12 +72,33 @@ impl MemoryCache {
     }
 
     pub fn get_recent(&self, n: usize) -> Vec<Message> {
-        self.messages
+        let mut result = self
+            .messages
             .iter()
             .rev()
             .take(n)
             .map(|(_, message)| message.clone())
-            .collect()
+            .collect::<Vec<Message>>();
+
+        if result.len() < n {
+            if let Ok(db) = self.db.lock() {
+                if let Ok(db_messages) = db.get_recent_messages((n - result.len()) as u64) {
+                    let cache_timestamps: std::collections::HashSet<_> =
+                        result.iter().map(|msg| msg.timestamp).collect();
+
+                    let mut additional_messages: Vec<_> = db_messages
+                        .into_iter()
+                        .filter(|msg| !cache_timestamps.contains(&msg.timestamp))
+                        .collect();
+
+                    result.append(&mut additional_messages);
+
+                    result.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+                }
+            }
+        }
+
+        result
     }
 
     pub fn size(&self) -> usize {
@@ -91,16 +112,6 @@ impl MemoryCache {
         } else {
             None
         }
-    }
-
-    pub fn remove_batch(&mut self, timestamps: &[u32]) -> Vec<Message> {
-        let mut removed = Vec::new();
-        for timestamp in timestamps {
-            if let Some(message) = self.remove(*timestamp) {
-                removed.push(message);
-            }
-        }
-        removed
     }
 }
 
@@ -231,39 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_batch() {
-        let (mut cache, _, db_path) = setup_test_cache(1000);
-
-        let mut timestamps = Vec::new();
-        let mut total_size = 0;
-        for i in 0..5 {
-            let message = create_test_message(
-                "test_exchange",
-                &format!("key_{}", i),
-                &format!("Message {}", i),
-                i,
-            );
-            timestamps.push(message.timestamp);
-            total_size += MemoryCache::calculate_message_size(&message);
-            cache.insert(message);
-        }
-
-        assert_eq!(cache.size(), total_size);
-
-        let timestamps_to_remove = &timestamps[0..3];
-        let removed = cache.remove_batch(timestamps_to_remove);
-
-        assert_eq!(removed.len(), 3);
-        
-        let remaining = cache.get_recent(10);
-        assert_eq!(remaining.len(), 2);
-        assert_eq!(remaining[0].routing_key, "key_4");
-        assert_eq!(remaining[1].routing_key, "key_3");
-
-        cleanup_test_resources(&db_path);
-    }
-
-    #[test]
     fn test_cache_ordering() {
         let (mut cache, _, db_path) = setup_test_cache(1000);
 
@@ -271,9 +249,9 @@ mod tests {
         let message2 = create_test_message("test_exchange", "key_2", "Message 2", 10);
         let message3 = create_test_message("test_exchange", "key_3", "Message 3", 30);
 
-        let total_size = MemoryCache::calculate_message_size(&message1) +
-                        MemoryCache::calculate_message_size(&message2) +
-                        MemoryCache::calculate_message_size(&message3);
+        let total_size = MemoryCache::calculate_message_size(&message1)
+            + MemoryCache::calculate_message_size(&message2)
+            + MemoryCache::calculate_message_size(&message3);
 
         cache.insert(message1);
         cache.insert(message2);
@@ -295,7 +273,7 @@ mod tests {
         let (mut cache, db_arc, db_path) = setup_test_cache(10000);
 
         let mut messages = Vec::new();
-        for i in 0..1000 {  // 增加消息数量以获得更明显的性能差异
+        for i in 0..1000 {
             messages.push(create_test_message(
                 "perf_test",
                 &format!("key_{}", i),
@@ -304,7 +282,6 @@ mod tests {
             ));
         }
 
-        // 预热缓存和数据库
         let warmup_message = create_test_message("warmup", "warmup", "warmup", 0);
         cache.insert(warmup_message.clone());
         {
@@ -312,17 +289,14 @@ mod tests {
             let _ = (*db).batch_insert(&vec![warmup_message]);
         }
 
-        // 测试缓存性能
         let start_cache = std::time::Instant::now();
         for message in messages.iter().take(100) {
             cache.insert(message.clone());
         }
         let cache_duration = start_cache.elapsed();
 
-        // 清空缓存
         cache.flush_oldest_to_db();
 
-        // 测试数据库性能
         let start_db = std::time::Instant::now();
         {
             let mut db = db_arc.lock().unwrap();
@@ -340,8 +314,10 @@ mod tests {
             db_duration
         );
 
-        // 不再断言具体的性能比较，因为这可能因环境而异
-        println!("Cache/DB performance ratio: {:.2}", cache_duration.as_secs_f64() / db_duration.as_secs_f64());
+        println!(
+            "Cache/DB performance ratio: {:.2}",
+            cache_duration.as_secs_f64() / db_duration.as_secs_f64()
+        );
 
         cleanup_test_resources(&db_path);
     }
@@ -403,24 +379,37 @@ mod tests {
             let message = create_test_message(
                 "test_exchange",
                 &format!("key_{}", i),
-                &format!("This is test message {} with additional content to make it larger", i),
+                &format!(
+                    "This is test message {} with additional content to make it larger",
+                    i
+                ),
                 i,
             );
             let msg_size = MemoryCache::calculate_message_size(&message);
             total_size += msg_size;
             cache.insert(message);
-            println!("Inserted message size: {} bytes, total size: {} bytes", msg_size, total_size);
+            println!(
+                "Inserted message size: {} bytes, total size: {} bytes",
+                msg_size, total_size
+            );
         }
 
         assert!(cache.current_size <= cache.max_size);
-        
+
         {
             let db = db_arc.lock().unwrap();
             let db_messages = db.get_recent_messages(10).unwrap();
             if total_size > max_size {
-                assert!(!db_messages.is_empty(), "Messages should be flushed to DB when size exceeds max_size");
+                assert!(
+                    !db_messages.is_empty(),
+                    "Messages should be flushed to DB when size exceeds max_size"
+                );
             } else {
-                assert_eq!(db_messages.len(), 0, "No messages should be flushed when size is within limit");
+                assert_eq!(
+                    db_messages.len(),
+                    0,
+                    "No messages should be flushed when size is within limit"
+                );
             }
         }
 
@@ -442,6 +431,94 @@ mod tests {
             assert!(!db_messages.is_empty());
             assert!(db_messages.iter().any(|m| m.routing_key == "key_0"));
         }
+
+        cleanup_test_resources(&db_path);
+    }
+
+    #[test]
+    fn test_get_recent_with_db_fallback() {
+        let (mut cache, db_arc, db_path) = setup_test_cache(1000);
+
+        let cache_messages: Vec<_> = (0..3)
+            .map(|i| {
+                create_test_message(
+                    "test_exchange",
+                    &format!("cache_key_{}", i),
+                    &format!("Cache message {}", i),
+                    i,
+                )
+            })
+            .collect();
+
+        let db_messages: Vec<_> = (3..6)
+            .map(|i| {
+                create_test_message(
+                    "test_exchange",
+                    &format!("db_key_{}", i),
+                    &format!("DB message {}", i),
+                    i,
+                )
+            })
+            .collect();
+
+        for msg in cache_messages.iter() {
+            cache.insert(msg.clone());
+        }
+
+        {
+            let mut db = db_arc.lock().unwrap();
+            db.batch_insert(&db_messages).unwrap();
+        }
+
+        let recent_messages = cache.get_recent(5);
+
+        assert_eq!(
+            recent_messages.len(),
+            5,
+            "应该返回5条消息（缓存3条 + 数据库2条）"
+        );
+
+        assert!(
+            recent_messages
+                .windows(2)
+                .all(|w| w[0].timestamp > w[1].timestamp),
+            "消息应该按时间戳降序排序"
+        );
+
+        let cache_keys = recent_messages
+            .iter()
+            .filter(|m| m.routing_key.starts_with("cache_key"))
+            .count();
+        let db_keys = recent_messages
+            .iter()
+            .filter(|m| m.routing_key.starts_with("db_key"))
+            .count();
+
+        assert_eq!(cache_keys, 3, "应该有3条来自缓存的消息");
+        assert_eq!(db_keys, 2, "应该有2条来自数据库的消息");
+
+        cleanup_test_resources(&db_path);
+    }
+
+    #[test]
+    fn test_get_recent_with_duplicate_prevention() {
+        let (mut cache, db_arc, db_path) = setup_test_cache(1000);
+
+        let test_message = create_test_message("test_exchange", "test_key", "Test message", 42);
+
+        cache.insert(test_message.clone());
+        {
+            let mut db = db_arc.lock().unwrap();
+            db.batch_insert(&vec![test_message.clone()]).unwrap();
+        }
+
+        let recent_messages = cache.get_recent(2);
+
+        assert_eq!(recent_messages.len(), 1, "相同的消息不应该重复返回");
+        assert_eq!(
+            recent_messages[0].timestamp, test_message.timestamp,
+            "应该返回正确的消息"
+        );
 
         cleanup_test_resources(&db_path);
     }

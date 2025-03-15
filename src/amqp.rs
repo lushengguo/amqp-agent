@@ -15,13 +15,13 @@ use tokio::time::{self, Instant};
 use tracing::{error, info, warn};
 use url::Url;
 
+use crate::config;
 use crate::db::DB;
 use crate::memory_cache::MemoryCache;
 use crate::models::Message;
 use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{future::Future, pin::Pin};
-use crate::config;
 
 const MAX_CONNECT_RETRIES: u32 = 3;
 
@@ -44,19 +44,17 @@ pub struct AmqpPublisher {
     channel: Option<Channel>,
     last_heartbeat: Option<Instant>,
     cache: Arc<StdMutex<MemoryCache>>,
-    db: Arc<StdMutex<DB>>,
     declared_exchanges: HashMap<String, ExchangeType>,
 }
 
 impl AmqpPublisher {
-    pub fn new(url: String, db: Arc<StdMutex<DB>>, cache: Arc<StdMutex<MemoryCache>>) -> Self {
+    pub fn new(url: String, cache: Arc<StdMutex<MemoryCache>>) -> Self {
         Self {
             url,
             connection: None,
             channel: None,
             last_heartbeat: None,
             cache,
-            db,
             declared_exchanges: HashMap::new(),
         }
     }
@@ -331,7 +329,7 @@ impl AmqpPublisher {
 
         let messages = {
             let cache = self.cache.lock().unwrap();
-            cache.get_recent(cache.size())
+            cache.get_recent(1000)
         };
 
         for message in messages {
@@ -341,7 +339,7 @@ impl AmqpPublisher {
                     &message.exchange_type,
                     &message.routing_key,
                     message.message.as_bytes(),
-                    true,  // 标记为重试消息
+                    true,
                 )
                 .await
             {
@@ -409,25 +407,22 @@ impl AmqpConnectionManager {
         self.db.clone()
     }
 
-    pub fn get_cache(&self) -> Arc<StdMutex<MemoryCache>> {
-        self.cache.clone()
-    }
-
-    pub async fn get_or_create_publisher(&mut self, url: String) -> Result<Arc<Mutex<AmqpPublisher>>> {
+    pub async fn get_or_create_publisher(
+        &mut self,
+        url: String,
+    ) -> Result<Arc<Mutex<AmqpPublisher>>> {
         if let Some(publisher) = self.publishers.get(&url) {
             return Ok(publisher.clone());
         }
 
         let publisher = Arc::new(Mutex::new(AmqpPublisher::new(
             url.clone(),
-            self.db.clone(),
             self.cache.clone(),
         )));
-        
-        // Start background tasks for the new publisher
+
         AmqpPublisher::start_heartbeat_task(publisher.clone()).await;
         AmqpPublisher::start_retry_task(publisher.clone()).await;
-        
+
         self.publishers.insert(url, publisher.clone());
         Ok(publisher)
     }
@@ -444,8 +439,7 @@ mod tests {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
         let mut publisher = AmqpPublisher::new(
             TEST_RABBITMQ_URL.to_string(),
-            db.clone(),
-            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone())))
+            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
         );
 
         match publisher.connect().await {
@@ -462,8 +456,7 @@ mod tests {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
         let mut publisher = AmqpPublisher::new(
             TEST_RABBITMQ_URL.to_string(),
-            db.clone(),
-            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone())))
+            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
         );
 
         let test_cases = vec![
@@ -507,8 +500,7 @@ mod tests {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
         let mut publisher = AmqpPublisher::new(
             "amqp://guest:guest@non_existent_host:5672".to_string(),
-            db.clone(),
-            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone())))
+            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
         );
 
         match publisher.connect().await {
@@ -525,8 +517,7 @@ mod tests {
         let cache = Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone())));
         let mut publisher = AmqpPublisher::new(
             "amqp://guest:guest@non_existent_host:5672".to_string(),
-            db.clone(),
-            cache.clone()
+            cache.clone(),
         );
 
         let test_message = Message {

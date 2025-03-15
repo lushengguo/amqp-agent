@@ -1,4 +1,4 @@
-use config::{Config, ConfigError};
+use config::Config;
 use serde::Deserialize;
 use std::error::Error;
 use std::time::Duration;
@@ -72,8 +72,9 @@ pub fn parse_size(size_str: &str) -> std::result::Result<usize, Box<dyn Error + 
         }
     }
 
-    let base: usize = num_str.parse()
-        .map_err(|_| Box::new(ConfigParseError::InvalidNumber(num_str.clone())) as Box<dyn Error + Send + Sync>)?;
+    let base: usize = num_str.parse().map_err(|_| {
+        Box::new(ConfigParseError::InvalidNumber(num_str.clone())) as Box<dyn Error + Send + Sync>
+    })?;
 
     match unit.trim() {
         "KB" => Ok(base * 1024),
@@ -84,7 +85,9 @@ pub fn parse_size(size_str: &str) -> std::result::Result<usize, Box<dyn Error + 
     }
 }
 
-pub fn parse_duration(duration_str: &str) -> std::result::Result<Duration, Box<dyn Error + Send + Sync>> {
+pub fn parse_duration(
+    duration_str: &str,
+) -> std::result::Result<Duration, Box<dyn Error + Send + Sync>> {
     let duration_str = duration_str.trim().to_uppercase();
     let mut num_str = String::new();
     let mut unit = String::new();
@@ -97,8 +100,9 @@ pub fn parse_duration(duration_str: &str) -> std::result::Result<Duration, Box<d
         }
     }
 
-    let base: u64 = num_str.parse()
-        .map_err(|_| Box::new(ConfigParseError::InvalidNumber(num_str.clone())) as Box<dyn Error + Send + Sync>)?;
+    let base: u64 = num_str.parse().map_err(|_| {
+        Box::new(ConfigParseError::InvalidNumber(num_str.clone())) as Box<dyn Error + Send + Sync>
+    })?;
 
     match unit.trim() {
         "S" => Ok(Duration::from_secs(base)),
