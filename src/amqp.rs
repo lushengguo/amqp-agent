@@ -7,7 +7,6 @@ use amqprs::{
     error::Error as AmqpError,
     BasicProperties,
 };
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -24,9 +23,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{future::Future, pin::Pin};
 use crate::config;
 
-const PUBLISH_TIMEOUT: Duration = Duration::from_secs(5);
-const RETRY_INTERVAL: Duration = Duration::from_secs(30);
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_CONNECT_RETRIES: u32 = 3;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -155,15 +151,6 @@ impl AmqpPublisher {
         })
     }
 
-    fn ensure_connection(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
-        Box::pin(async move {
-            if self.connection.is_none() || !self.is_connected().await {
-                self.connect().await?;
-            }
-            Ok(())
-        })
-    }
-
     async fn declare_exchange(
         &mut self,
         exchange: &str,
@@ -207,6 +194,7 @@ impl AmqpPublisher {
         exchange_type: &str,
         routing_key: &str,
         message: &[u8],
+        is_retry: bool,
     ) -> Result<()> {
         if !self.is_connected().await {
             self.connect().await?;
@@ -234,8 +222,10 @@ impl AmqpPublisher {
             );
         }
 
+        let log_prefix = if is_retry { "[RETRY]" } else { "" };
         info!(
-            "Preparing to send message - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes",
+            "{}Preparing to send message - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes",
+            log_prefix,
             exchange,
             exchange_type_str,
             routing_key,
@@ -252,7 +242,8 @@ impl AmqpPublisher {
         {
             Ok(_) => {
                 info!(
-                    "Message sent successfully - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes",
+                    "{}Message sent successfully - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes",
+                    log_prefix,
                     exchange,
                     exchange_type_str,
                     routing_key,
@@ -262,7 +253,8 @@ impl AmqpPublisher {
             }
             Err(e) => {
                 let error_msg = format!(
-                    "Failed to send message - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes, Error: {}",
+                    "{}Failed to send message - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes, Error: {}",
+                    log_prefix,
                     exchange,
                     exchange_type_str,
                     routing_key,
@@ -270,8 +262,10 @@ impl AmqpPublisher {
                     e
                 );
                 error!("{}", error_msg);
-                self.cache_message(exchange, exchange_type_str, routing_key, message)
-                    .await?;
+                if !is_retry {
+                    self.cache_message(exchange, exchange_type_str, routing_key, message)
+                        .await?;
+                }
                 Err(Box::new(AmqpError::ChannelUseError(error_msg)) as Box<dyn Error + Send + Sync>)
             }
         }
@@ -347,15 +341,21 @@ impl AmqpPublisher {
                     &message.exchange_type,
                     &message.routing_key,
                     message.message.as_bytes(),
+                    true,  // 标记为重试消息
                 )
                 .await
             {
                 Ok(_) => {
                     let mut cache = self.cache.lock().unwrap();
                     cache.remove(message.timestamp);
+                    info!(
+                        "[RETRY] Successfully removed message from cache - Exchange: {}, RoutingKey: {}",
+                        message.exchange,
+                        message.routing_key
+                    );
                 }
                 Err(e) => {
-                    error!("Failed to retry message: {}", e);
+                    error!("[RETRY] Failed to retry message: {}", e);
                 }
             }
         }
@@ -423,6 +423,11 @@ impl AmqpConnectionManager {
             self.db.clone(),
             self.cache.clone(),
         )));
+        
+        // Start background tasks for the new publisher
+        AmqpPublisher::start_heartbeat_task(publisher.clone()).await;
+        AmqpPublisher::start_retry_task(publisher.clone()).await;
+        
         self.publishers.insert(url, publisher.clone());
         Ok(publisher)
     }
@@ -479,7 +484,7 @@ mod tests {
 
         for (exchange, ex_type, routing_key, message) in test_cases {
             match publisher
-                .publish(exchange, ex_type, routing_key, message.as_bytes())
+                .publish(exchange, ex_type, routing_key, message.as_bytes(), false)
                 .await
             {
                 Ok(_) => {

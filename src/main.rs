@@ -142,6 +142,7 @@ async fn retry_cached_messages() -> Result<()> {
                         &message.exchange_type,
                         &message.routing_key,
                         message.message.as_bytes(),
+                        true,
                     )
                     .await
                 {
@@ -168,7 +169,7 @@ async fn publish_message(
     let mut publisher = publisher.lock().await;
     update_stats(&url, &exchange, &routing_key).await;
     publisher
-        .publish(&exchange, &exchange_type, &routing_key, message.as_bytes())
+        .publish(&exchange, &exchange_type, &routing_key, message.as_bytes(), false)
         .await
 }
 
