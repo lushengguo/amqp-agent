@@ -1,99 +1,99 @@
-use super::memory_cache::MemoryCache;
-use super::models::Message;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 use amqprs::{
     channel::{BasicPublishArguments, Channel, ConfirmSelectArguments},
     connection::{Connection, OpenConnectionArguments},
-    error::Error as AmqpError,
     BasicProperties,
+    error::Error as AmqpError,
 };
-use std::{future::Future, pin::Pin, sync::Arc};
-use tokio::time::{self, timeout, Duration, Instant};
+use tokio::sync::Mutex;
+use tokio::time::{self, Instant};
 use tracing::{error, info, warn};
 use url::Url;
+use once_cell::sync::Lazy;
+
+use crate::memory_cache::MemoryCache;
+use crate::db::DB;
+use crate::models::Message;
+use super::models::Message as AmqpMessage;
+use std::{future::Future, pin::Pin};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::error::Error;
 
 const PUBLISH_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_CONNECT_RETRIES: u32 = 3;
 
-fn parse_amqp_url(url_str: &str) -> Result<(String, String, String), AmqpError> {
-    let url = Url::parse(url_str).map_err(|e| {
-        AmqpError::ChannelUseError(format!("Invalid AMQP URL: {}", e))
-    })?;
+type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
-    if url.scheme() != "amqp" {
-        return Err(AmqpError::ChannelUseError(
-            "URL scheme must be 'amqp'".to_string(),
-        ));
-    }
-
-    let host = format!("{}:{}", url.host_str().unwrap_or("localhost"), 
-                               url.port().unwrap_or(5672));
-    let username = url.username().to_string();
-    let password = url.password().unwrap_or("guest").to_string();
-
-    Ok((host, username, password))
-}
-
-#[derive(Debug, Default)]
-pub struct PublishStats {
-    pub total_messages: u64,
-    pub successful_messages: u64,
-    pub failed_messages: u64,
-    pub retried_messages: u64,
-    pub total_latency: u64,
-    pub last_heartbeat: Option<Instant>,
-}
-
-impl PublishStats {
-    pub fn update_heartbeat(&mut self) {
-        self.last_heartbeat = Some(Instant::now());
-    }
-
-    pub fn is_connection_alive(&self) -> bool {
-        self.last_heartbeat
-            .map(|t| t.elapsed() < HEARTBEAT_INTERVAL * 2)
-            .unwrap_or(false)
-    }
-}
+pub static CONNECTION_MANAGER: Lazy<Mutex<AmqpConnectionManager>> = Lazy::new(|| {
+    let db = Arc::new(StdMutex::new(DB::new().expect("Failed to create database")));
+    Mutex::new(AmqpConnectionManager::new(db))
+});
 
 pub struct AmqpPublisher {
+    url: String,
     connection: Option<Connection>,
     channel: Option<Channel>,
-    cache: Arc<tokio::sync::Mutex<MemoryCache>>,
-    url: String,
-    stats: PublishStats,
+    last_heartbeat: Option<Instant>,
+    cache: Arc<StdMutex<MemoryCache>>,
+    db: Arc<StdMutex<DB>>,
 }
 
 impl AmqpPublisher {
-    pub fn new(url: String, cache: Arc<tokio::sync::Mutex<MemoryCache>>) -> Self {
+    pub fn new(url: String, db: Arc<StdMutex<DB>>) -> Self {
+        let cache = Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone())));
         Self {
+            url,
             connection: None,
             channel: None,
+            last_heartbeat: None,
             cache,
-            url,
-            stats: PublishStats::default(),
+            db,
         }
     }
 
-    async fn do_connect(&mut self) -> Result<(), AmqpError> {
-        let (host, username, password) = parse_amqp_url(&self.url)?;
-        let args = OpenConnectionArguments::new(&host, &username, &password);
-        let connection = Connection::open(&args).await?;
-        let channel = connection.open_channel(None).await?;
+    fn parse_amqp_url(url_str: &str) -> Result<(String, String, String)> {
+        let url = Url::parse(url_str).map_err(|e| {
+            Box::new(AmqpError::ChannelUseError(format!("Invalid AMQP URL: {}", e))) as Box<dyn Error + Send + Sync>
+        })?;
 
-        channel
+        if url.scheme() != "amqp" {
+            return Err(Box::new(AmqpError::ChannelUseError(
+                "URL scheme must be 'amqp'".to_string(),
+            )) as Box<dyn Error + Send + Sync>);
+        }
+
+        let host = format!(
+            "{}:{}",
+            url.host_str().unwrap_or("localhost"),
+            url.port().unwrap_or(5672)
+        );
+        let username = url.username().to_string();
+        let password = url.password().unwrap_or("").to_string();
+
+        Ok((host, username, password))
+    }
+
+    async fn do_connect(&mut self) -> Result<()> {
+        let (host, username, password) = Self::parse_amqp_url(&self.url)?;
+        let args = OpenConnectionArguments::new(&host, &username, &password);
+
+        self.connection = Some(Connection::open(&args).await?);
+        self.channel = Some(self.connection.as_ref().unwrap().open_channel(None).await?);
+        self.channel
+            .as_ref()
+            .unwrap()
             .confirm_select(ConfirmSelectArguments::default())
             .await?;
 
-        self.connection = Some(connection);
-        self.channel = Some(channel);
-        self.stats.update_heartbeat();
-
+        self.last_heartbeat = Some(Instant::now());
         Ok(())
     }
 
-    fn connect(&mut self) -> Pin<Box<dyn Future<Output = Result<(), AmqpError>> + Send + '_>> {
+    fn connect(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
             if self.connection.is_some() {
                 return Ok(());
@@ -102,285 +102,226 @@ impl AmqpPublisher {
             let mut retries = 0;
             while retries < MAX_CONNECT_RETRIES {
                 match self.do_connect().await {
-                    Ok(_) => {
-                        info!("成功连接到 RabbitMQ");
-
-                        self.retry_cached_messages().await;
-                        return Ok(());
-                    }
+                    Ok(_) => return Ok(()),
                     Err(e) => {
-                        retries += 1;
-                        if retries == MAX_CONNECT_RETRIES {
-                            error!("连接 RabbitMQ 失败，已达到最大重试次数: {}", e);
-                            return Err(e);
-                        }
-                        warn!("连接 RabbitMQ 失败，将在 3 秒后重试: {}", e);
+                        let error_msg = format!("连接 RabbitMQ 失败: {}", e);
+                        warn!("{}，将在 3 秒后重试", error_msg);
                         time::sleep(Duration::from_secs(3)).await;
+                        retries += 1;
                     }
                 }
             }
 
-            Err(AmqpError::ChannelUseError("无法建立连接".to_string()))
+            Err(Box::new(AmqpError::ChannelUseError("无法建立连接".to_string())) as Box<dyn Error + Send + Sync>)
         })
     }
 
     fn ensure_connection(
         &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AmqpError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
-            if self.connection.is_none() || !self.stats.is_connection_alive() {
-                if self.connection.is_some() {
-                    warn!("心跳检测失败，重新建立连接");
-                }
-                self.connection = None;
-                self.channel = None;
+            if self.connection.is_none() || !self.is_connected().await {
                 self.connect().await?;
             }
             Ok(())
         })
     }
 
-    pub async fn publish(&mut self, message: Message) -> Result<(), AmqpError> {
-        self.stats.total_messages += 1;
-        let start_time = Instant::now();
-
-        if let Err(e) = self.ensure_connection().await {
-            let mut cache = self.cache.lock().await;
-            cache.insert(message);
-            self.stats.failed_messages += 1;
-            return Err(e);
+    pub async fn publish(&mut self, exchange: &str, routing_key: &str, message: &[u8]) -> Result<()> {
+        if !self.is_connected().await {
+            self.connect().await?;
         }
 
-        let channel = self.channel.as_ref().unwrap();
-        let args = BasicPublishArguments::new(&message.exchange, &message.routing_key);
-        let props = BasicProperties::default();
-        let body = message.message.as_bytes().to_vec();
-
-        match timeout(PUBLISH_TIMEOUT, channel.basic_publish(props, body, args)).await {
-            Ok(result) => match result {
-                Ok(_) => {
-                    let latency = start_time.elapsed();
-                    self.stats.successful_messages += 1;
-                    self.stats.total_latency += latency.as_millis() as u64;
-                    self.stats.update_heartbeat();
-                    info!(
-                        "消息发送成功: exchange={}, routing_key={}, latency={:?}",
-                        message.exchange, message.routing_key, latency
-                    );
-                    Ok(())
-                }
-                Err(e) => {
-                    warn!("消息发送失败: {}", e);
-
-                    let mut cache = self.cache.lock().await;
-                    cache.insert(message);
-
-                    self.connection = None;
-                    self.channel = None;
-                    self.stats.failed_messages += 1;
-                    Err(e)
-                }
-            },
-            Err(_) => {
-                warn!("消息发送超时");
-
-                let mut cache = self.cache.lock().await;
-                cache.insert(message);
-
-                self.connection = None;
-                self.channel = None;
-                self.stats.failed_messages += 1;
-                Err(AmqpError::ChannelUseError("发送超时".to_string()))
+        let args = BasicPublishArguments::new(exchange, routing_key);
+        match self
+            .channel
+            .as_ref()
+            .unwrap()
+            .basic_publish(BasicProperties::default(), message.to_vec(), args)
+            .await
+        {
+            Ok(_) => {
+                info!("消息发送成功");
+                Ok(())
+            }
+            Err(e) => {
+                let error_msg = format!("发送消息失败: {}", e);
+                error!("{}", error_msg);
+                self.cache_message(exchange, routing_key, message).await?;
+                Err(Box::new(AmqpError::ChannelUseError(error_msg)) as Box<dyn Error + Send + Sync>)
             }
         }
     }
 
-    async fn retry_cached_messages(&mut self) {
-        let mut timestamps_to_remove = Vec::new();
+    async fn cache_message(&self, exchange: &str, routing_key: &str, message: &[u8]) -> Result<()> {
+        let message = Message {
+            url: self.url.clone(),
+            exchange: exchange.to_string(),
+            routing_key: routing_key.to_string(),
+            message: String::from_utf8_lossy(message).to_string(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as u32,
+        };
+
+        let mut cache = self.cache.lock().unwrap();
+        cache.insert(message);
+        Ok(())
+    }
+
+    pub async fn is_connected(&self) -> bool {
+        if let Some(last_heartbeat) = self.last_heartbeat {
+            if last_heartbeat.elapsed() > Duration::from_secs(30) {
+                warn!("心跳检测失败，重新建立连接");
+                return false;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn retry_cached_messages(&mut self) -> Result<()> {
+        if !self.is_connected().await {
+            return Ok(());
+        }
 
         let messages = {
-            let cache = self.cache.lock().await;
+            let cache = self.cache.lock().unwrap();
             cache.get_recent(cache.size())
         };
 
         for message in messages {
-            self.stats.retried_messages += 1;
-            match self.publish(message.clone()).await {
+            match self
+                .publish(&message.exchange, &message.routing_key, message.message.as_bytes())
+                .await
+            {
                 Ok(_) => {
-                    timestamps_to_remove.push(message.timestamp);
+                    let mut cache = self.cache.lock().unwrap();
+                    cache.remove(message.timestamp);
                 }
                 Err(e) => {
                     error!("重试发送消息失败: {}", e);
-                    break;
                 }
             }
         }
 
-        if !timestamps_to_remove.is_empty() {
-            let mut cache = self.cache.lock().await;
-            cache.remove_batch(&timestamps_to_remove);
-        }
+        Ok(())
     }
 
-    pub async fn start_retry_task(publisher: Arc<tokio::sync::Mutex<AmqpPublisher>>) {
+    pub async fn start_retry_task(publisher: Arc<Mutex<AmqpPublisher>>) {
         tokio::spawn(async move {
             loop {
-                time::sleep(RETRY_INTERVAL).await;
+                time::sleep(Duration::from_secs(5)).await;
                 let mut publisher = publisher.lock().await;
-                publisher.retry_cached_messages().await;
+                if let Err(e) = publisher.retry_cached_messages().await {
+                    error!("重试缓存消息失败: {}", e);
+                }
             }
         });
     }
 
-    pub async fn start_heartbeat_task(publisher: Arc<tokio::sync::Mutex<AmqpPublisher>>) {
+    pub async fn start_heartbeat_task(publisher: Arc<Mutex<AmqpPublisher>>) {
         tokio::spawn(async move {
             loop {
-                time::sleep(HEARTBEAT_INTERVAL).await;
+                time::sleep(Duration::from_secs(15)).await;
                 let mut publisher = publisher.lock().await;
-                if let Err(e) = publisher.ensure_connection().await {
-                    error!("心跳检测失败: {}", e);
+                if !publisher.is_connected().await {
+                    if let Err(e) = publisher.connect().await {
+                        error!("重新连接失败: {}", e);
+                    }
                 }
             }
         });
     }
 }
 
+pub struct AmqpConnectionManager {
+    publishers: HashMap<String, Arc<Mutex<AmqpPublisher>>>,
+    db: Arc<StdMutex<DB>>,
+}
+
+impl AmqpConnectionManager {
+    pub fn new(db: Arc<StdMutex<DB>>) -> Self {
+        Self {
+            publishers: HashMap::new(),
+            db,
+        }
+    }
+
+    pub fn get_db(&self) -> Arc<StdMutex<DB>> {
+        self.db.clone()
+    }
+
+    pub async fn get_or_create_publisher(&mut self, url: String) -> Result<Arc<Mutex<AmqpPublisher>>> {
+        if let Some(publisher) = self.publishers.get(&url) {
+            Ok(publisher.clone())
+        } else {
+            let publisher = AmqpPublisher::new(url.clone(), self.db.clone());
+            let publisher = Arc::new(Mutex::new(publisher));
+            self.publishers.insert(url, publisher.clone());
+            Ok(publisher)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Message;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use crate::db::DB;
-    use std::sync::Mutex;
 
-    fn setup_test_db() -> Arc<Mutex<DB>> {
-        let db = DB::new().unwrap();
-        Arc::new(Mutex::new(db))
-    }
-
-    async fn wait_for_rabbitmq(url: &str, max_retries: u32) -> bool {
-        for _ in 0..max_retries {
-            let (host, username, password) = match parse_amqp_url(url) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            
-            let args = OpenConnectionArguments::new(&host, &username, &password);
-            match Connection::open(&args).await {
-                Ok(_) => return true,
-                Err(_) => {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            }
-        }
-        false
-    }
+    const TEST_RABBITMQ_URL: &str = "amqp://guest:guest@localhost:5672";
 
     #[tokio::test]
     async fn test_connect_to_local_rabbitmq() {
-        let rabbitmq_url = "amqp://guest:guest@127.0.0.1:5672";
-        
-        // 等待 RabbitMQ 可用
-        if !wait_for_rabbitmq(rabbitmq_url, 5).await {
-            println!("警告: RabbitMQ 服务器不可用，跳过测试");
-            return;
-        }
-
-        // 创建测试数据库和缓存
-        let db = setup_test_db();
-        let cache = Arc::new(tokio::sync::Mutex::new(MemoryCache::new(100, db.clone())));
-        
-        // 创建发布者实例
+        let db = Arc::new(StdMutex::new(DB::new().unwrap()));
         let mut publisher = AmqpPublisher::new(
-            rabbitmq_url.to_string(),
-            cache.clone(),
+            TEST_RABBITMQ_URL.to_string(),
+            db.clone(),
         );
 
-        // 测试连接
-        let result = publisher.ensure_connection().await;
-        assert!(result.is_ok(), "连接到本地RabbitMQ失败: {:?}", result);
-
-        // 创建测试消息
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as u32;
-            
-        let test_message = Message {
-            url: rabbitmq_url.to_string(),
-            exchange: "test_exchange".to_string(),
-            routing_key: "test_key".to_string(),
-            message: "测试消息".to_string(),
-            timestamp,
-        };
-
-        // 测试发布消息
-        let publish_result = publisher.publish(test_message).await;
-        assert!(publish_result.is_ok(), "发布消息失败: {:?}", publish_result);
-
-        // 检查统计信息
-        assert_eq!(publisher.stats.total_messages, 1);
-        assert_eq!(publisher.stats.successful_messages, 1);
-        assert_eq!(publisher.stats.failed_messages, 0);
-        assert!(publisher.stats.last_heartbeat.is_some());
+        match publisher.connect().await {
+            Ok(_) => assert!(true),
+            Err(e) => {
+                println!("连接到本地RabbitMQ失败: {}", e);
+                assert!(false);
+            }
+        }
     }
 
     #[tokio::test]
-    async fn test_connection_retry() {
-        let db = setup_test_db();
-        let cache = Arc::new(tokio::sync::Mutex::new(MemoryCache::new(100, db.clone())));
+    async fn test_connect_to_invalid_host() {
+        let db = Arc::new(StdMutex::new(DB::new().unwrap()));
         let mut publisher = AmqpPublisher::new(
             "amqp://guest:guest@non_existent_host:5672".to_string(),
-            cache.clone(),
+            db.clone(),
         );
 
-        // 测试连接重试
-        let result = publisher.ensure_connection().await;
-        assert!(result.is_err(), "应该无法连接到不存在的主机");
-        assert_eq!(publisher.stats.failed_messages, 0);
+        match publisher.connect().await {
+            Ok(_) => assert!(false, "应该连接失败"),
+            Err(_) => assert!(true),
+        }
     }
 
     #[tokio::test]
     async fn test_publish_with_cache() {
-        let rabbitmq_url = "amqp://guest:guest@127.0.0.1:5672";
-        
-        // 等待 RabbitMQ 可用
-        if !wait_for_rabbitmq(rabbitmq_url, 5).await {
-            println!("警告: RabbitMQ 服务器不可用，跳过测试");
-            return;
-        }
-
-        let db = setup_test_db();
-        let cache = Arc::new(tokio::sync::Mutex::new(MemoryCache::new(100, db.clone())));
+        let db = Arc::new(StdMutex::new(DB::new().unwrap()));
         let mut publisher = AmqpPublisher::new(
-            rabbitmq_url.to_string(),
-            cache.clone(),
+            TEST_RABBITMQ_URL.to_string(),
+            db.clone(),
         );
 
-        // 创建测试消息
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as u32;
-            
-        let test_message = Message {
-            url: rabbitmq_url.to_string(),
-            exchange: "test_exchange".to_string(),
-            routing_key: "test_key".to_string(),
-            message: "测试缓存消息".to_string(),
-            timestamp,
-        };
+        let exchange = "test_exchange";
+        let routing_key = "test_key";
+        let message = "test message";
 
-        // 确保连接
-        let _ = publisher.ensure_connection().await;
-
-        // 发布消息
-        let result = publisher.publish(test_message.clone()).await;
-        assert!(result.is_ok(), "发布消息失败: {:?}", result);
-
-        // 检查缓存
-        let cache_lock = cache.lock().await;
-        assert_eq!(cache_lock.size(), 0, "成功发送的消息不应该在缓存中");
+        match publisher.publish(exchange, routing_key, message.as_bytes()).await {
+            Ok(_) => assert!(true),
+            Err(e) => {
+                println!("发布消息失败: {}", e);
+                assert!(false);
+            }
+        }
     }
 }

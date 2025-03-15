@@ -9,8 +9,11 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt::Layer, util::SubscriberInitExt, EnvFilter};
 
-pub fn init_logger(log_config: &LogConfig) -> Result<(), Box<dyn Error>> {
-    fs::create_dir_all(&log_config.directory)?;
+type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
+
+pub fn init_logger(log_config: &LogConfig) -> Result<()> {
+    fs::create_dir_all(&log_config.directory)
+        .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
 
     if let Err(e) = cleanup_old_logs(
         &log_config.directory,
@@ -71,21 +74,30 @@ pub fn start_log_cleaner(log_config: LogConfig) {
     });
 }
 
-fn cleanup_old_logs(directory: &str, prefix: &str, max_days: u64) -> Result<(), Box<dyn Error>> {
+fn cleanup_old_logs(directory: &str, prefix: &str, max_days: u64) -> Result<()> {
     let max_age = max_days * 24 * 60 * 60;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
+        .as_secs();
 
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
+    for entry in fs::read_dir(directory)
+        .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
+    {
+        let entry = entry.map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
         let path = entry.path();
 
         if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
             if file_name.starts_with(prefix) && file_name.ends_with(".log") {
                 if let Ok(metadata) = fs::metadata(&path) {
                     if let Ok(modified) = metadata.modified() {
-                        let age = now - modified.duration_since(UNIX_EPOCH)?.as_secs();
+                        let age = now - modified
+                            .duration_since(UNIX_EPOCH)
+                            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
+                            .as_secs();
                         if age > max_age {
-                            fs::remove_file(&path)?;
+                            fs::remove_file(&path)
+                                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
                             info!("已删除过期日志文件: {}", path.display());
                         }
                     }
