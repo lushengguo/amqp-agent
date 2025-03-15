@@ -137,12 +137,11 @@ mod tests {
     #[test]
     fn test_cache_creation() {
         let (cache, _, db_path) = setup_test_cache(10);
-        
-        
+
         assert_eq!(cache.size(), 0);
-        
+
         assert!(cache.messages.is_empty());
-        
+
         cleanup_test_resources(&db_path);
     }
 
@@ -295,8 +294,14 @@ mod tests {
         }
         let db_duration = start_db.elapsed();
 
-        println!("Time taken to cache 100 messages in memory: {:?}", cache_duration);
-        println!("Time taken to insert 100 messages directly to database: {:?}", db_duration);
+        println!(
+            "Time taken to cache 100 messages in memory: {:?}",
+            cache_duration
+        );
+        println!(
+            "Time taken to insert 100 messages directly to database: {:?}",
+            db_duration
+        );
 
         assert!(cache_duration < db_duration);
 

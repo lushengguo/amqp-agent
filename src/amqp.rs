@@ -22,6 +22,7 @@ use crate::models::Message;
 use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{future::Future, pin::Pin};
+use crate::config;
 
 const PUBLISH_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_INTERVAL: Duration = Duration::from_secs(30);
@@ -30,10 +31,16 @@ const MAX_CONNECT_RETRIES: u32 = 3;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
-pub static CONNECTION_MANAGER: Lazy<Mutex<AmqpConnectionManager>> = Lazy::new(|| {
-    let db = Arc::new(StdMutex::new(DB::new().expect("Failed to create database")));
-    Mutex::new(AmqpConnectionManager::new(db))
-});
+lazy_static::lazy_static! {
+    pub static ref CONNECTION_MANAGER: Arc<Mutex<AmqpConnectionManager>> = {
+        let settings = config::Settings::new().expect("Failed to load config");
+        let cache_size = config::parse_size(&settings.cache.max_size)
+            .expect("Failed to parse cache size");
+        let db = Arc::new(StdMutex::new(DB::new().expect("Failed to create DB")));
+        let cache = Arc::new(StdMutex::new(MemoryCache::new(cache_size, db.clone())));
+        Arc::new(Mutex::new(AmqpConnectionManager::new(db, cache)))
+    };
+}
 
 pub struct AmqpPublisher {
     url: String,
@@ -46,8 +53,7 @@ pub struct AmqpPublisher {
 }
 
 impl AmqpPublisher {
-    pub fn new(url: String, db: Arc<StdMutex<DB>>) -> Self {
-        let cache = Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone())));
+    pub fn new(url: String, db: Arc<StdMutex<DB>>, cache: Arc<StdMutex<MemoryCache>>) -> Self {
         Self {
             url,
             connection: None,
@@ -143,10 +149,9 @@ impl AmqpPublisher {
                 }
             }
 
-            Err(
-                Box::new(AmqpError::ChannelUseError("Unable to establish connection".to_string()))
-                    as Box<dyn Error + Send + Sync>,
-            )
+            Err(Box::new(AmqpError::ChannelUseError(
+                "Unable to establish connection".to_string(),
+            )) as Box<dyn Error + Send + Sync>)
         })
     }
 
@@ -183,8 +188,10 @@ impl AmqpPublisher {
             args.durable(true).auto_delete(false);
 
             channel.exchange_declare(args.clone()).await?;
-            self.declared_exchanges
-                .insert(exchange.to_string(), ExchangeType::from(exchange_type.to_string()));
+            self.declared_exchanges.insert(
+                exchange.to_string(),
+                ExchangeType::from(exchange_type.to_string()),
+            );
             info!("Exchange declared successfully - {}", exchange);
             Ok(())
         } else {
@@ -221,7 +228,10 @@ impl AmqpPublisher {
 
         let exchange_type_str = exchange_type.to_string();
         if let Err(e) = self.declare_exchange(exchange, &exchange_type).await {
-            warn!("Failed to declare Exchange: {} - attempting to send message anyway", e);
+            warn!(
+                "Failed to declare Exchange: {} - attempting to send message anyway",
+                e
+            );
         }
 
         info!(
@@ -383,13 +393,15 @@ impl AmqpPublisher {
 pub struct AmqpConnectionManager {
     publishers: HashMap<String, Arc<Mutex<AmqpPublisher>>>,
     db: Arc<StdMutex<DB>>,
+    cache: Arc<StdMutex<MemoryCache>>,
 }
 
 impl AmqpConnectionManager {
-    pub fn new(db: Arc<StdMutex<DB>>) -> Self {
+    pub fn new(db: Arc<StdMutex<DB>>, cache: Arc<StdMutex<MemoryCache>>) -> Self {
         Self {
             publishers: HashMap::new(),
             db,
+            cache,
         }
     }
 
@@ -397,18 +409,22 @@ impl AmqpConnectionManager {
         self.db.clone()
     }
 
-    pub async fn get_or_create_publisher(
-        &mut self,
-        url: String,
-    ) -> Result<Arc<Mutex<AmqpPublisher>>> {
+    pub fn get_cache(&self) -> Arc<StdMutex<MemoryCache>> {
+        self.cache.clone()
+    }
+
+    pub async fn get_or_create_publisher(&mut self, url: String) -> Result<Arc<Mutex<AmqpPublisher>>> {
         if let Some(publisher) = self.publishers.get(&url) {
-            Ok(publisher.clone())
-        } else {
-            let publisher = AmqpPublisher::new(url.clone(), self.db.clone());
-            let publisher = Arc::new(Mutex::new(publisher));
-            self.publishers.insert(url, publisher.clone());
-            Ok(publisher)
+            return Ok(publisher.clone());
         }
+
+        let publisher = Arc::new(Mutex::new(AmqpPublisher::new(
+            url.clone(),
+            self.db.clone(),
+            self.cache.clone(),
+        )));
+        self.publishers.insert(url, publisher.clone());
+        Ok(publisher)
     }
 }
 
@@ -422,7 +438,7 @@ mod tests {
     #[tokio::test]
     async fn test_connect_to_local_rabbitmq() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
-        let mut publisher = AmqpPublisher::new(TEST_RABBITMQ_URL.to_string(), db.clone());
+        let mut publisher = AmqpPublisher::new(TEST_RABBITMQ_URL.to_string(), db.clone(), Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))));
 
         match publisher.connect().await {
             Ok(_) => assert!(true),
@@ -436,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn test_publish_with_different_exchange_types() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
-        let mut publisher = AmqpPublisher::new(TEST_RABBITMQ_URL.to_string(), db.clone());
+        let mut publisher = AmqpPublisher::new(TEST_RABBITMQ_URL.to_string(), db.clone(), Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))));
 
         let test_cases = vec![
             (
@@ -464,7 +480,10 @@ mod tests {
                     assert!(true);
                 }
                 Err(e) => {
-                    println!("Failed to send to {} ({}) exchange: {}", exchange, ex_type, e);
+                    println!(
+                        "Failed to send to {} ({}) exchange: {}",
+                        exchange, ex_type, e
+                    );
                     assert!(false);
                 }
             }
@@ -477,6 +496,7 @@ mod tests {
         let mut publisher = AmqpPublisher::new(
             "amqp://guest:guest@non_existent_host:5672".to_string(),
             db.clone(),
+            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
         );
 
         match publisher.connect().await {
@@ -488,7 +508,7 @@ mod tests {
     #[tokio::test]
     async fn test_publish_with_cache() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
-        let mut publisher = AmqpPublisher::new(TEST_RABBITMQ_URL.to_string(), db.clone());
+        let mut publisher = AmqpPublisher::new(TEST_RABBITMQ_URL.to_string(), db.clone(), Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))));
 
         let exchange = "test_exchange";
         let exchange_type = "topic";

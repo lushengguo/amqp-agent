@@ -7,17 +7,17 @@ mod models;
 
 use crate::amqp::CONNECTION_MANAGER;
 use crate::models::Message;
+use std::collections::HashMap;
 use std::error::Error;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::SystemTime;
+use tokio::sync::Mutex;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     net::{TcpListener, TcpStream},
 };
 use tracing::{debug, error, info, warn};
-use std::time::Duration;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use std::time::{SystemTime};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -44,7 +44,10 @@ impl StatsKey {
     }
 
     fn to_string(&self) -> String {
-        format!("[{}] [{}:{}]", self.ip_port, self.exchange, self.routing_key)
+        format!(
+            "[{}] [{}:{}]",
+            self.ip_port, self.exchange, self.routing_key
+        )
     }
 }
 
@@ -54,13 +57,17 @@ lazy_static::lazy_static! {
 
 async fn update_stats(url: &str, exchange: &str, routing_key: &str) {
     let mut stats = MESSAGE_STATS.lock().await;
-    let key = StatsKey::new(url.to_string(), exchange.to_string(), routing_key.to_string());
-    
+    let key = StatsKey::new(
+        url.to_string(),
+        exchange.to_string(),
+        routing_key.to_string(),
+    );
+
     let entry = stats.entry(key).or_insert(MessageStats {
         count: 0,
         timestamp: SystemTime::now(),
     });
-    
+
     entry.count += 1;
     entry.timestamp = SystemTime::now();
 }
@@ -70,35 +77,37 @@ async fn start_stats_reporter() {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             let mut stats = MESSAGE_STATS.lock().await;
-            
+
             let mut report = String::new();
             report.push_str("\nMessage statistics for the last 60 seconds:\n");
-            
+
             // Filter and collect stats for the last 60 seconds
             let mut active_stats: Vec<(String, u64)> = stats
                 .iter()
                 .filter(|(_, stats)| {
-                    stats.timestamp.elapsed().unwrap_or(Duration::from_secs(61)) <= Duration::from_secs(60)
+                    stats.timestamp.elapsed().unwrap_or(Duration::from_secs(61))
+                        <= Duration::from_secs(60)
                 })
                 .map(|(key, stats)| (key.to_string(), stats.count))
                 .collect();
-            
+
             // Sort by message count
             active_stats.sort_by(|a, b| b.1.cmp(&a.1));
-            
+
             for (key, count) in active_stats {
                 report.push_str(&format!("{}: {} messages\n", key, count));
             }
-            
+
             // Clear old entries
             stats.retain(|_, stats| {
-                stats.timestamp.elapsed().unwrap_or(Duration::from_secs(61)) <= Duration::from_secs(60)
+                stats.timestamp.elapsed().unwrap_or(Duration::from_secs(61))
+                    <= Duration::from_secs(60)
             });
-            
+
             if !report.contains("messages") {
                 report.push_str("No messages sent in the last 60 seconds\n");
             }
-            
+
             info!("{}", report);
         }
     });
@@ -127,7 +136,15 @@ async fn retry_cached_messages() -> Result<()> {
         match manager.get_or_create_publisher(message.url.clone()).await {
             Ok(publisher) => {
                 let mut publisher = publisher.lock().await;
-                if let Err(e) = publisher.publish(&message.exchange, &message.exchange_type, &message.routing_key, message.message.as_bytes()).await {
+                if let Err(e) = publisher
+                    .publish(
+                        &message.exchange,
+                        &message.exchange_type,
+                        &message.routing_key,
+                        message.message.as_bytes(),
+                    )
+                    .await
+                {
                     error!("Failed to retry message: {}", e);
                 }
             }
@@ -139,12 +156,20 @@ async fn retry_cached_messages() -> Result<()> {
     Ok(())
 }
 
-async fn publish_message(url: String, exchange: String, exchange_type: String, routing_key: String, message: String) -> Result<()> {
+async fn publish_message(
+    url: String,
+    exchange: String,
+    exchange_type: String,
+    routing_key: String,
+    message: String,
+) -> Result<()> {
     let mut manager = CONNECTION_MANAGER.lock().await;
     let publisher = manager.get_or_create_publisher(url.clone()).await?;
     let mut publisher = publisher.lock().await;
     update_stats(&url, &exchange, &routing_key).await;
-    publisher.publish(&exchange, &exchange_type, &routing_key, message.as_bytes()).await
+    publisher
+        .publish(&exchange, &exchange_type, &routing_key, message.as_bytes())
+        .await
 }
 
 async fn process_connection(mut stream: TcpStream) -> Result<()> {
@@ -166,8 +191,10 @@ async fn process_connection(mut stream: TcpStream) -> Result<()> {
                     message.exchange.clone(),
                     message.exchange_type.clone(),
                     message.routing_key.clone(),
-                    message.message.clone()
-                ).await {
+                    message.message.clone(),
+                )
+                .await
+                {
                     error!("Failed to publish message to RabbitMQ: {}", e);
                 }
             }
@@ -186,7 +213,7 @@ async fn main() -> Result<()> {
     logger::init_logger(&settings.log)?;
 
     logger::start_log_cleaner(settings.log.clone());
-    
+
     start_publisher_background_tasks().await;
     start_stats_reporter().await;
 

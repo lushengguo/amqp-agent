@@ -1,29 +1,18 @@
-use crate::config::LogConfig;
-use std::{
-    error::Error,
-    fs,
-    time::{SystemTime, UNIX_EPOCH},
-};
-use tracing::{error, info, Level};
+use crate::config::LogSettings;
+use std::fs;
+use std::path::Path;
+use std::time::Duration;
+use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::{fmt::Layer, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{
+    fmt::writer::MakeWriterExt,
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
+    EnvFilter,
+};
 
-type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
-
-pub fn init_logger(log_config: &LogConfig) -> Result<()> {
-    fs::create_dir_all(&log_config.directory)
-        .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
-
-    if let Err(e) = cleanup_old_logs(
-        &log_config.directory,
-        &log_config.prefix,
-        log_config.max_days,
-    ) {
-        eprintln!("Error cleaning old log files: {}", e);
-    }
-
-    let log_level = match log_config.level.to_lowercase().as_str() {
+pub fn init_logger(config: &LogSettings) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let level = match config.level.to_lowercase().as_str() {
         "trace" => Level::TRACE,
         "debug" => Level::DEBUG,
         "info" => Level::INFO,
@@ -32,78 +21,67 @@ pub fn init_logger(log_config: &LogConfig) -> Result<()> {
         _ => Level::INFO,
     };
 
-    let file_appender =
-        RollingFileAppender::new(Rotation::DAILY, &log_config.directory, &log_config.prefix);
+    let file_appender = RollingFileAppender::new(
+        Rotation::DAILY,
+        &config.dir,
+        "app.log",
+    );
 
-    let console_layer = Layer::new()
-        .with_target(false)
-        .with_thread_ids(true)
-        .with_file(true)
-        .with_line_number(true);
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking.with_max_level(level));
 
-    let file_layer = Layer::new()
-        .with_ansi(false)
-        .with_target(false)
-        .with_thread_ids(true)
-        .with_file(true)
-        .with_line_number(true)
-        .with_writer(file_appender);
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout.with_max_level(level));
 
     tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env().add_directive(log_level.into()))
-        .with(console_layer)
+        .with(EnvFilter::from_default_env().add_directive(level.into()))
         .with(file_layer)
+        .with(stdout_layer)
         .init();
 
     Ok(())
 }
 
-pub fn start_log_cleaner(log_config: LogConfig) {
+pub fn start_log_cleaner(config: LogSettings) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(24 * 60 * 60));
         loop {
-            interval.tick().await;
-            if let Err(e) = cleanup_old_logs(
-                &log_config.directory,
-                &log_config.prefix,
-                log_config.max_days,
-            ) {
-                error!("Error during periodic log file cleanup: {}", e);
+            if let Err(e) = clean_old_logs(&config).await {
+                tracing::error!("Error cleaning old log files: {}", e);
             }
+            tokio::time::sleep(Duration::from_secs(3600)).await;
         }
     });
 }
 
-fn cleanup_old_logs(directory: &str, prefix: &str, max_days: u64) -> Result<()> {
-    let max_age = max_days * 24 * 60 * 60;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
-        .as_secs();
+async fn clean_old_logs(config: &LogSettings) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let log_dir = Path::new(&config.dir);
+    if !log_dir.exists() {
+        return Ok(());
+    }
 
-    for entry in fs::read_dir(directory)
-        .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
-    {
-        let entry = entry.map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
-        let path = entry.path();
+    let entries = fs::read_dir(log_dir)?;
+    let max_files = config.max_files;
+    let mut files: Vec<_> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.path().extension().map_or(false, |ext| ext == "log")
+        })
+        .collect();
 
-        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-            if file_name.starts_with(prefix) && file_name.ends_with(".log") {
-                if let Ok(metadata) = fs::metadata(&path) {
-                    if let Ok(modified) = metadata.modified() {
-                        let age = now - modified
-                            .duration_since(UNIX_EPOCH)
-                            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
-                            .as_secs();
-                        if age > max_age {
-                            fs::remove_file(&path)
-                                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
-                            info!("Deleted expired log file: {}", path.display());
-                        }
-                    }
-                }
-            }
+    if files.len() <= max_files as usize {
+        return Ok(());
+    }
+
+    files.sort_by_key(|entry| entry.metadata().unwrap().modified().unwrap());
+
+    for file in files.iter().take(files.len() - max_files as usize) {
+        if let Err(e) = fs::remove_file(file.path()) {
+            tracing::error!("Error deleting expired log file: {}", e);
+        } else {
+            tracing::info!("Deleted expired log file: {}", file.path().display());
         }
     }
+
     Ok(())
 }

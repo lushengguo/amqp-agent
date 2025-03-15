@@ -3,7 +3,11 @@ host = "127.0.0.1"
 port = 8080
 
 [log]
-level = "info"  # Available values: trace, debug, info, warn, error
-directory = "logs"  # Log file directory
-prefix = "app"     # Log file name prefix
-max_days = 30      # Maximum days to keep logs 
+dir = "logs"
+level = "info"
+max_size = "100MB"
+max_files = 10
+clean_interval = "1h"
+
+[cache]
+max_size = "100MB"  # Supports KB, MB, GB units 
