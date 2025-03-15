@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 amqprs = "0.1.14"
 tokio = { version = "1.44.1", features = ["full"] }
-rusqlite = "0.30.0"
+rusqlite = { version = "0.30.0", features = ["bundled"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 config = "0.13"
