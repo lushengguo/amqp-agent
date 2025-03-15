@@ -141,9 +141,9 @@ mod tests {
     fn test_cache_creation() {
         let (cache, _, db_path) = setup_test_cache(10);
         
-        // 验证初始状态
+        
         assert_eq!(cache.size(), 0);
-        // 不需要测试max_size，因为它是通过构造函数设置的
+        
         assert!(cache.messages.is_empty());
         
         cleanup_test_resources(&db_path);

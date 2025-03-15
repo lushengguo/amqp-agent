@@ -40,7 +40,7 @@ async fn retry_cached_messages() -> Result<()> {
         match manager.get_or_create_publisher(message.url.clone()).await {
             Ok(publisher) => {
                 let mut publisher = publisher.lock().await;
-                if let Err(e) = publisher.publish(&message.exchange, &message.routing_key, message.message.as_bytes()).await {
+                if let Err(e) = publisher.publish(&message.exchange, &message.exchange_type, &message.routing_key, message.message.as_bytes()).await {
                     error!("重试发送消息失败: {}", e);
                 }
             }
@@ -52,11 +52,11 @@ async fn retry_cached_messages() -> Result<()> {
     Ok(())
 }
 
-async fn publish_message(url: String, exchange: String, routing_key: String, message: String) -> Result<()> {
+async fn publish_message(url: String, exchange: String, exchange_type: String, routing_key: String, message: String) -> Result<()> {
     let mut manager = CONNECTION_MANAGER.lock().await;
     let publisher = manager.get_or_create_publisher(url.clone()).await?;
     let mut publisher = publisher.lock().await;
-    publisher.publish(&exchange, &routing_key, message.as_bytes()).await
+    publisher.publish(&exchange, &exchange_type, &routing_key, message.as_bytes()).await
 }
 
 async fn process_connection(mut stream: TcpStream) -> Result<()> {
@@ -76,6 +76,7 @@ async fn process_connection(mut stream: TcpStream) -> Result<()> {
                 if let Err(e) = publish_message(
                     message.url.clone(),
                     message.exchange.clone(),
+                    message.exchange_type.clone(),
                     message.routing_key.clone(),
                     message.message.clone()
                 ).await {

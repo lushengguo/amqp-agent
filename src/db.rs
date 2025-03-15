@@ -14,6 +14,7 @@ impl DB {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 url TEXT NOT NULL,
                 exchange TEXT NOT NULL,
+                exchange_type TEXT NOT NULL,
                 routing_key TEXT NOT NULL,
                 message TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
@@ -26,11 +27,12 @@ impl DB {
 
     pub fn insert(&mut self, message: &Message) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO messages (url, exchange, routing_key, message, timestamp) 
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO messages (url, exchange, exchange_type, routing_key, message, timestamp) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 message.url,
                 message.exchange,
+                message.exchange_type,
                 message.routing_key,
                 message.message,
                 message.timestamp
@@ -43,14 +45,15 @@ impl DB {
         let tx = self.conn.transaction()?;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO messages (url, exchange, routing_key, message, timestamp) 
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO messages (url, exchange, exchange_type, routing_key, message, timestamp) 
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
 
             for message in messages {
                 stmt.execute(params![
                     message.url,
                     message.exchange,
+                    message.exchange_type,
                     message.routing_key,
                     message.message,
                     message.timestamp
@@ -63,7 +66,7 @@ impl DB {
 
     pub fn get_recent_messages(&self, limit: u64) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT url, exchange, routing_key, message, timestamp 
+            "SELECT url, exchange, routing_key, message, timestamp, exchange_type 
              FROM messages 
              ORDER BY timestamp DESC, created_at DESC 
              LIMIT ?",
@@ -77,6 +80,7 @@ impl DB {
                     routing_key: row.get(2)?,
                     message: row.get(3)?,
                     timestamp: row.get(4)?,
+                    exchange_type: row.get(5)?,
                 })
             })?
             .collect::<Result<Vec<Message>>>()?;
@@ -86,7 +90,7 @@ impl DB {
 
     pub fn get_messages_by_exchange(&self, exchange: &str, limit: u64) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT url, exchange, routing_key, message, timestamp 
+            "SELECT url, exchange, routing_key, message, timestamp, exchange_type 
              FROM messages 
              WHERE exchange = ?
              ORDER BY timestamp DESC, created_at DESC 
@@ -101,6 +105,7 @@ impl DB {
                     routing_key: row.get(2)?,
                     message: row.get(3)?,
                     timestamp: row.get(4)?,
+                    exchange_type: row.get(5)?,
                 })
             })?
             .collect::<Result<Vec<Message>>>()?;
@@ -122,6 +127,7 @@ impl DB {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 url TEXT NOT NULL,
                 exchange TEXT NOT NULL,
+                exchange_type TEXT NOT NULL,
                 routing_key TEXT NOT NULL,
                 message TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,

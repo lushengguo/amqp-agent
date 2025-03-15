@@ -18,8 +18,11 @@ DEFAULT_COUNT = -1  # 发送消息数量,-1表示无限发送
 
 # RabbitMQ配置
 RABBITMQ_URL = "amqp://guest:guest@127.0.0.1:5672"
-EXCHANGES = ["test_exchange", "logs_exchange", "data_exchange"]
-ROUTING_KEYS = ["test_key", "info", "error", "data.priority.high", "data.priority.low"]
+EXCHANGES = ["test"]
+ROUTING_KEYS = [""]
+EXCHANGE_TYPES = ["direct", 
+# "topic", "fanout", "headers"
+]
 
 class MessageGenerator:
     """生成测试消息的类"""
@@ -34,6 +37,7 @@ class MessageGenerator:
         # 随机选择交换机和路由键
         exchange = random.choice(EXCHANGES)
         routing_key = random.choice(ROUTING_KEYS)
+        exchange_type = random.choice(EXCHANGE_TYPES)
         
         # 获取当前时间戳
         timestamp = int(time.time())
@@ -54,6 +58,7 @@ class MessageGenerator:
         message = {
             "url": RABBITMQ_URL,
             "exchange": exchange,
+            "exchange_type": exchange_type,
             "routing_key": routing_key,
             "message": json.dumps(content, ensure_ascii=False),
             "timestamp": timestamp
