@@ -5,9 +5,7 @@ port = 8080
 [log]
 dir = "logs"
 level = "info"
-max_size = "100MB"
 max_files = 10
-clean_interval = "1h"
 
 [cache]
 max_size = "100MB"  # Supports KB, MB, GB units 

@@ -1,7 +1,6 @@
 use config::Config;
 use serde::Deserialize;
 use std::error::Error;
-use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
 pub struct Settings {
@@ -20,9 +19,7 @@ pub struct ServerSettings {
 pub struct LogSettings {
     pub dir: String,
     pub level: String,
-    pub max_size: String,
     pub max_files: u32,
-    pub clean_interval: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,35 +78,6 @@ pub fn parse_size(size_str: &str) -> std::result::Result<usize, Box<dyn Error + 
         "MB" => Ok(base * 1024 * 1024),
         "GB" => Ok(base * 1024 * 1024 * 1024),
         "" => Ok(base),
-        _ => Err(Box::new(ConfigParseError::UnsupportedUnit(unit)) as Box<dyn Error + Send + Sync>),
-    }
-}
-
-pub fn parse_duration(
-    duration_str: &str,
-) -> std::result::Result<Duration, Box<dyn Error + Send + Sync>> {
-    let duration_str = duration_str.trim().to_uppercase();
-    let mut num_str = String::new();
-    let mut unit = String::new();
-
-    for c in duration_str.chars() {
-        if c.is_digit(10) {
-            num_str.push(c);
-        } else {
-            unit.push(c);
-        }
-    }
-
-    let base: u64 = num_str.parse().map_err(|_| {
-        Box::new(ConfigParseError::InvalidNumber(num_str.clone())) as Box<dyn Error + Send + Sync>
-    })?;
-
-    match unit.trim() {
-        "S" => Ok(Duration::from_secs(base)),
-        "M" => Ok(Duration::from_secs(base * 60)),
-        "H" => Ok(Duration::from_secs(base * 3600)),
-        "D" => Ok(Duration::from_secs(base * 86400)),
-        "" => Ok(Duration::from_secs(base)),
         _ => Err(Box::new(ConfigParseError::UnsupportedUnit(unit)) as Box<dyn Error + Send + Sync>),
     }
 }
