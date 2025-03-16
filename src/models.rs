@@ -11,10 +11,17 @@ pub struct Message {
 }
 
 impl Message {
-pub fn locator(&self) ->String{
-    format!(
-        "{}.{}.{}.{}.{:?}",
-        self.url, self.exchange, self.exchange_type, self.routing_key, md5::compute(self.message.clone())
-    )
-}
+    pub fn locator(&self) -> String {
+        format!(
+            "{:?}",
+            md5::compute(format!(
+                "{}.{}.{}.{}.{}",
+                self.url,
+                self.exchange,
+                self.exchange_type,
+                self.routing_key,
+                self.message.clone()
+            ))
+        )
+    }
 }

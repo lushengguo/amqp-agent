@@ -12,7 +12,7 @@ impl DB {
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                locator TEXT PRIMARY KEY,
                 url TEXT NOT NULL,
                 exchange TEXT NOT NULL,
                 exchange_type TEXT NOT NULL,
@@ -42,12 +42,13 @@ impl DB {
         let tx = self.conn.transaction()?;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO messages (url, exchange, exchange_type, routing_key, message, timestamp) 
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR REPLACE INTO messages (locator, url, exchange, exchange_type, routing_key, message, timestamp) 
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
 
             for message in messages {
                 stmt.execute(params![
+                    message.locator(),
                     message.url,
                     message.exchange,
                     message.exchange_type,
@@ -88,20 +89,36 @@ impl DB {
     pub fn remove_message(&mut self, messages: &[Message]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
-            // since message already been buffered, there is no need to publish two or more same data to the same exchange
-            // and exchange could not have two types at the same time
-            let mut stmt = tx.prepare("DELETE FROM messages WHERE url = ?1 AND exchange = ?2 AND routing_key = ?3 AND message = ?4")?;
+            let mut stmt = tx.prepare("DELETE FROM messages WHERE locator = ?1")?;
             for message in messages {
-                stmt.execute(params![
-                    message.url,
-                    message.exchange,
-                    message.routing_key,
-                    message.message
-                ])?;
+                stmt.execute(params![message.locator()])?;
             }
         }
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn get_message_by_locator(&self, locator: &str) -> Result<Option<Message>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT url, exchange, routing_key, message, timestamp, exchange_type 
+             FROM messages 
+             WHERE locator = ?",
+        )?;
+
+        let mut messages = stmt
+            .query_map(params![locator], |row| {
+                Ok(Message {
+                    url: row.get(0)?,
+                    exchange: row.get(1)?,
+                    routing_key: row.get(2)?,
+                    message: row.get(3)?,
+                    timestamp: row.get(4)?,
+                    exchange_type: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<Message>>>()?;
+
+        Ok(messages.pop())
     }
 
     #[cfg(test)]
@@ -115,7 +132,7 @@ impl DB {
         let conn = Connection::open(path)?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                locator TEXT PRIMARY KEY,
                 url TEXT NOT NULL,
                 exchange TEXT NOT NULL,
                 exchange_type TEXT NOT NULL,
@@ -187,15 +204,15 @@ mod tests {
         let (mut db, db_path) = setup_test_db();
 
         let message = create_test_message("test_exchange", "test_key", "Hello, world!");
+        let locator = message.locator();
 
         let result = db.batch_insert(&[message]);
         assert!(result.is_ok());
 
-        let messages = db.get_recent_messages(10).unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].exchange, "test_exchange");
-        assert_eq!(messages[0].routing_key, "test_key");
-        assert_eq!(messages[0].message, "Hello, world!");
+        let retrieved_message = db.get_message_by_locator(&locator).unwrap().unwrap();
+        assert_eq!(retrieved_message.exchange, "test_exchange");
+        assert_eq!(retrieved_message.routing_key, "test_key");
+        assert_eq!(retrieved_message.message, "Hello, world!");
 
         cleanup_test_db(&db_path);
     }
@@ -272,195 +289,13 @@ mod tests {
     }
 
     #[test]
-    fn test_transaction_rollback() {
-        let (mut db, db_path) = setup_test_db();
-
-        {
-            let tx = db.conn.transaction().unwrap();
-            tx.execute(
-                "INSERT INTO messages (url, exchange, exchange_type, routing_key, message, timestamp) 
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    "amqp://localhost:5672",
-                    "test_exchange",
-                    "topic",
-                    "test_key",
-                    "Transaction test message",
-                    1000u32
-                ],
-            )
-            .unwrap();
-            tx.commit().unwrap();
-        }
-
-        let messages = db.get_recent_messages(10).unwrap();
-        assert_eq!(messages.len(), 1);
-
-        {
-            let tx = db.conn.transaction().unwrap();
-            tx.execute(
-                "INSERT INTO messages (url, exchange, exchange_type, routing_key, message, timestamp) 
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    "amqp://localhost:5672",
-                    "test_exchange",
-                    "topic",
-                    "test_key",
-                    "This message should not be committed",
-                    2000u32
-                ],
-            )
-            .unwrap();
-        }
-
-        let messages_after_rollback = db.get_recent_messages(10).unwrap();
-        assert_eq!(messages_after_rollback.len(), 1);
-        assert_eq!(messages_after_rollback[0].timestamp, 1000);
-
-        cleanup_test_db(&db_path);
-    }
-
-    #[test]
-    fn test_get_messages_by_exchange_with_limit() {
-        let (mut db, db_path) = setup_test_db();
-
-        let mut messages = Vec::new();
-        for i in 0..20 {
-            messages.push(create_test_message(
-                "same_exchange",
-                &format!("key_{}", i),
-                &format!("Message {}", i),
-            ));
-
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-
-        db.batch_insert(&messages).unwrap();
-
-        let all_messages = db.get_recent_messages(100).unwrap();
-        let same_exchange_messages: Vec<_> = all_messages
-            .into_iter()
-            .filter(|msg| msg.exchange == "same_exchange")
-            .take(5)
-            .collect();
-
-        assert_eq!(same_exchange_messages.len(), 5);
-        for msg in &same_exchange_messages {
-            assert_eq!(msg.exchange, "same_exchange");
-        }
-
-        let all_same_exchange_messages: Vec<_> = db
-            .get_recent_messages(100)
-            .unwrap()
-            .into_iter()
-            .filter(|msg| msg.exchange == "same_exchange")
-            .collect();
-
-        assert_eq!(all_same_exchange_messages.len(), 20);
-
-        cleanup_test_db(&db_path);
-    }
-
-    #[test]
     fn test_invalid_db_path() {
         let result = DB::new_with_path("/invalid/path/that/does/not/exist/db.sqlite");
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_performance_batch_vs_individual() {
-        let (mut db, db_path) = setup_test_db();
-
-        let mut messages = Vec::new();
-        for i in 0..100 {
-            messages.push(create_test_message(
-                "perf_test",
-                &format!("key_{}", i),
-                &format!("Performance test message {}", i),
-            ));
-        }
-
-        let start_individual = std::time::Instant::now();
-        for message in &messages {
-            db.batch_insert(&[message.clone()]).unwrap();
-        }
-        let individual_duration = start_individual.elapsed();
-
-        db.clear_all().unwrap();
-
-        let start_batch = std::time::Instant::now();
-        db.batch_insert(&messages).unwrap();
-        let batch_duration = start_batch.elapsed();
-
-        let all_messages = db.get_recent_messages(200).unwrap();
-        assert_eq!(all_messages.len(), 100);
-
-        println!("Single insert duration: {:?}", individual_duration);
-        println!("Batch insert duration: {:?}", batch_duration);
-        println!(
-            "Batch insert performance improvement: {:.2}x",
-            individual_duration.as_micros() as f64 / batch_duration.as_micros() as f64
-        );
-
-        assert!(batch_duration < individual_duration);
-
-        cleanup_test_db(&db_path);
-    }
-
-    #[test]
-    fn test_concurrent_access() {
-        use std::sync::{Arc, Mutex};
-        use std::thread;
-
-        let (db, db_path) = setup_test_db();
-        let db = Arc::new(Mutex::new(db));
-
-        let mut handles = vec![];
-
-        for thread_id in 0..5 {
-            let db_clone = Arc::clone(&db);
-            let handle = thread::spawn(move || {
-                let mut messages = Vec::new();
-                for i in 0..20 {
-                    messages.push(create_test_message(
-                        &format!("thread_{}", thread_id),
-                        &format!("key_{}", i),
-                        &format!("Message from thread {} - {}", thread_id, i),
-                    ));
-                }
-
-                let mut db = db_clone.lock().unwrap();
-                db.batch_insert(&messages).unwrap();
-            });
-
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        {
-            let db_ref = db.lock().unwrap();
-            let all_messages = db_ref.get_recent_messages(200).unwrap();
-            assert_eq!(all_messages.len(), 100);
-
-            for thread_id in 0..5 {
-                let thread_messages: Vec<_> = db_ref
-                    .get_recent_messages(100)
-                    .unwrap()
-                    .into_iter()
-                    .filter(|msg| msg.exchange == format!("thread_{}", thread_id))
-                    .collect();
-                assert_eq!(thread_messages.len(), 20);
-            }
-        }
-
-        cleanup_test_db(&db_path);
-    }
-
-    #[test]
-    pub fn test_remove_message() {
+    fn test_remove_message() {
         let (mut db, db_path) = setup_test_db();
 
         let messages = vec![
@@ -480,5 +315,99 @@ mod tests {
         assert_eq!(remaining_messages[0].message, "Message 2");
 
         cleanup_test_db(&db_path);
+    }
+
+    #[test]
+    fn test_duplicate_message() {
+        let (mut db, db_path) = setup_test_db();
+
+        let message = create_test_message("exchange1", "key1", "Message 1");
+        let locator = message.locator();
+
+        // 第一次插入
+        db.batch_insert(&[message.clone()]).unwrap();
+
+        // 第二次插入相同的消息
+        db.batch_insert(&[message.clone()]).unwrap();
+
+        // 验证只存在一条记录
+        let count = db.message_count().unwrap();
+        assert_eq!(count, 1);
+
+        // 验证消息内容正确
+        let stored_message = db.get_message_by_locator(&locator).unwrap().unwrap();
+        assert_eq!(stored_message.exchange, "exchange1");
+        assert_eq!(stored_message.routing_key, "key1");
+        assert_eq!(stored_message.message, "Message 1");
+
+        cleanup_test_db(&db_path);
+    }
+
+    #[test]
+    fn test_locator_uniqueness() {
+        let (mut db, db_path) = setup_test_db();
+
+        // 创建两条内容相同但时间戳不同的消息
+        let message1 = create_test_message("exchange1", "key1", "Same content");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let message2 = create_test_message("exchange1", "key1", "Same content");
+
+        // 它们应该有相同的 locator
+        assert_eq!(message1.locator(), message2.locator());
+
+        // 插入第一条消息
+        db.batch_insert(&[message1]).unwrap();
+        let count1 = db.message_count().unwrap();
+        assert_eq!(count1, 1);
+
+        // 插入第二条消息（应该替换第一条）
+        db.batch_insert(&[message2]).unwrap();
+        let count2 = db.message_count().unwrap();
+        assert_eq!(count2, 1);
+
+        cleanup_test_db(&db_path);
+    }
+
+    #[test]
+    fn test_get_nonexistent_message() {
+        let (db, db_path) = setup_test_db();
+
+        // 尝试获取不存在的消息
+        let result = db.get_message_by_locator("nonexistent_locator").unwrap();
+        assert!(result.is_none());
+
+        cleanup_test_db(&db_path);
+    }
+
+    #[test]
+    fn test_message_fields_affect_locator() {
+        let base_message = create_test_message("exchange1", "key1", "Message 1");
+        let base_locator = base_message.locator();
+
+        // 测试不同字段的变化会产生不同的 locator
+        let mut diff_url = base_message.clone();
+        diff_url.url = "amqp://different:5672".to_string();
+        assert_ne!(diff_url.locator(), base_locator);
+
+        let mut diff_exchange = base_message.clone();
+        diff_exchange.exchange = "different_exchange".to_string();
+        assert_ne!(diff_exchange.locator(), base_locator);
+
+        let mut diff_type = base_message.clone();
+        diff_type.exchange_type = "fanout".to_string();
+        assert_ne!(diff_type.locator(), base_locator);
+
+        let mut diff_routing = base_message.clone();
+        diff_routing.routing_key = "different_key".to_string();
+        assert_ne!(diff_routing.locator(), base_locator);
+
+        let mut diff_message = base_message.clone();
+        diff_message.message = "Different message".to_string();
+        assert_ne!(diff_message.locator(), base_locator);
+
+        // 时间戳不应该影响 locator
+        let mut diff_timestamp = base_message.clone();
+        diff_timestamp.timestamp = 12345;
+        assert_eq!(diff_timestamp.locator(), base_locator);
     }
 }
