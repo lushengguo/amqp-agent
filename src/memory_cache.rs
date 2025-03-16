@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
-const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub struct MemoryCache {
     messages: HashMap<String, Message>,

@@ -450,11 +450,11 @@ impl AmqpProduceer {
         format!("{}:{}", exchange, routing_key)
     }
 
-    pub fn generate_report(&self) -> Vec<PeriodProduceReport> {
+    pub fn generate_report(&self, duration: Duration) -> Vec<PeriodProduceReport> {
         let now = Instant::now();
         let mut report = Vec::new();
         for stats in self.message_stats.values() {
-            if now.duration_since(stats.last_updated) < Duration::from_secs(60) {
+            if now.duration_since(stats.last_updated) < duration {
                 report.push(PeriodProduceReport {
                     url: stats.url.clone(),
                     exchange: stats.exchange.clone(),
@@ -526,12 +526,15 @@ impl AmqpConnectionManager {
         Ok(producer)
     }
 
-    pub async fn generate_reports(&self) -> (Vec<PeriodProduceReport>, CacheReport) {
+    pub async fn generate_reports(
+        &self,
+        duration: Duration,
+    ) -> (Vec<PeriodProduceReport>, CacheReport) {
         let mut produce_report = Vec::new();
 
         for producer in self.producers.values() {
             let producer_guard = producer.lock().await;
-            produce_report.extend(producer_guard.generate_report());
+            produce_report.extend(producer_guard.generate_report(duration));
         }
 
         let cache = self.cache.lock();
@@ -691,7 +694,7 @@ mod tests {
             )
             .await;
 
-        let report = producer.generate_report();
+        let report = producer.generate_report(Duration::from_secs(1));
 
         assert!(!report.is_empty());
         let PeriodProduceReport {

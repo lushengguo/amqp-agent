@@ -126,9 +126,10 @@ async fn process_connection(mut stream: TcpStream) -> Result<()> {
 async fn start_report_task() {
     tokio::spawn(async move {
         loop {
-            time::sleep(Duration::from_secs(20)).await;
+            let period = Duration::from_secs(20);
+            time::sleep(period).await;
             let manager = CONNECTION_MANAGER.lock().await;
-            let (produce_reports, cache_report) = manager.generate_reports().await;
+            let (produce_reports, cache_report) = manager.generate_reports(period).await;
 
             for report in produce_reports {
                 info!(
