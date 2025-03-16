@@ -7,11 +7,10 @@ use amqprs::{
     error::Error as AmqpError,
     BasicProperties,
 };
-use parking_lot::{deadlock, Mutex as StdMutex};
+use parking_lot::{deadlock, Mutex as ParkingLotMutex};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tokio::time::{self, Instant};
 use tracing::{debug, error, info, warn};
 use url::Url;
@@ -25,13 +24,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{future::Future, pin::Pin};
 
 const MAX_CONNECT_RETRIES: u32 = 3;
-#[cfg(test)]
-const MUTEX_TIMEOUT: Duration = Duration::from_secs(5);
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 lazy_static::lazy_static! {
-    pub static ref CONNECTION_MANAGER: Arc<Mutex<AmqpConnectionManager>> = {
+    pub static ref CONNECTION_MANAGER: Arc<ParkingLotMutex<AmqpConnectionManager>> = {
 
         std::thread::spawn(move || {
             loop {
@@ -55,9 +52,9 @@ lazy_static::lazy_static! {
         let settings = config::Settings::new().expect("Failed to load config");
         let cache_size = config::parse_size(&settings.cache.max_size)
             .expect("Failed to parse cache size");
-        let db = Arc::new(StdMutex::new(DB::new().expect("Failed to create DB")));
-        let cache = Arc::new(StdMutex::new(MemoryCache::new(cache_size, db.clone())));
-        Arc::new(Mutex::new(AmqpConnectionManager::new(db, cache)))
+        let db = Arc::new(ParkingLotMutex::new(DB::new().expect("Failed to create DB")));
+        let cache = Arc::new(ParkingLotMutex::new(MemoryCache::new(cache_size, db.clone())));
+        Arc::new(ParkingLotMutex::new(AmqpConnectionManager::new(db, cache)))
     };
 }
 
@@ -89,13 +86,13 @@ pub struct AmqpProduceer {
     connection: Option<Connection>,
     channel: Option<Channel>,
     last_heartbeat: Option<Instant>,
-    cache: Arc<StdMutex<MemoryCache>>,
+    cache: Arc<ParkingLotMutex<MemoryCache>>,
     declared_exchanges: HashMap<String, ExchangeType>,
     message_stats: HashMap<String, MessageStats>,
 }
 
 impl AmqpProduceer {
-    pub fn new(url: String, cache: Arc<StdMutex<MemoryCache>>) -> Self {
+    pub fn new(url: String, cache: Arc<ParkingLotMutex<MemoryCache>>) -> Self {
         Self {
             url,
             connection: None,
@@ -424,7 +421,7 @@ impl AmqpProduceer {
                     let locator = message.locator();
                     let exchange = message.exchange.clone();
                     let routing_key = message.routing_key.clone();
-                    info!(
+                    debug!(
                         "[RETRY] Successfully removed message from cache - Exchange: {}, RoutingKey: {}",
                         exchange, routing_key
                     );
@@ -439,7 +436,7 @@ impl AmqpProduceer {
         Ok(())
     }
 
-    pub async fn start_retry_task(producer: Arc<Mutex<AmqpProduceer>>) {
+    pub async fn start_retry_task(producer: Arc<ParkingLotMutex<AmqpProduceer>>) {
         tokio::spawn(async move {
             loop {
                 time::sleep(Duration::from_secs(5)).await;
@@ -451,7 +448,7 @@ impl AmqpProduceer {
         });
     }
 
-    pub async fn start_heartbeat_task(producer: Arc<Mutex<AmqpProduceer>>) {
+    pub async fn start_heartbeat_task(producer: Arc<ParkingLotMutex<AmqpProduceer>>) {
         tokio::spawn(async move {
             loop {
                 time::sleep(Duration::from_secs(15)).await;
@@ -488,57 +485,12 @@ impl AmqpProduceer {
         }
         report
     }
-
-    #[cfg(test)]
-    fn remove_from_cache(&mut self, message: Message) -> Result<()> {
-        let locator = message.locator();
-        let exchange = message.exchange.clone();
-        let routing_key = message.routing_key.clone();
-
-        let mut cache = self.cache.lock();
-        info!(
-            "Removing message from cache - Exchange: {}, RoutingKey: {}, Total messages in cache: {}",
-            exchange, routing_key,
-            cache.message_count()
-        );
-        cache.remove(&locator);
-        Ok(())
-    }
-
-    #[cfg(test)]
-    async fn retry_send(&mut self, message: Message) -> Result<()> {
-        let locator = message.locator();
-        let exchange = message.exchange.clone();
-        let routing_key = message.routing_key.clone();
-
-        match self
-            .produce(
-                &message.exchange,
-                &message.exchange_type,
-                &message.routing_key,
-                message.message.as_bytes(),
-                true,
-            )
-            .await
-        {
-            Ok(_) => {
-                let mut cache = self.cache.lock();
-                info!(
-                    "[RETRY] Successfully removed message from cache - Exchange: {}, RoutingKey: {}",
-                    exchange, routing_key
-                );
-                cache.remove(&locator);
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
-    }
 }
 
 pub struct AmqpConnectionManager {
-    producers: HashMap<String, Arc<Mutex<AmqpProduceer>>>,
-    db: Arc<StdMutex<DB>>,
-    cache: Arc<StdMutex<MemoryCache>>,
+    producers: HashMap<String, Arc<ParkingLotMutex<AmqpProduceer>>>,
+    db: Arc<ParkingLotMutex<DB>>,
+    cache: Arc<ParkingLotMutex<MemoryCache>>,
 }
 
 pub struct PeriodProduceReport {
@@ -557,7 +509,7 @@ pub struct CacheReport {
 }
 
 impl AmqpConnectionManager {
-    pub fn new(db: Arc<StdMutex<DB>>, cache: Arc<StdMutex<MemoryCache>>) -> Self {
+    pub fn new(db: Arc<ParkingLotMutex<DB>>, cache: Arc<ParkingLotMutex<MemoryCache>>) -> Self {
         Self {
             producers: HashMap::new(),
             db,
@@ -565,14 +517,10 @@ impl AmqpConnectionManager {
         }
     }
 
-    pub fn get_db(&self) -> Arc<StdMutex<DB>> {
-        self.db.clone()
-    }
-
     pub async fn get_or_create_producer(
         &mut self,
         url: String,
-    ) -> Result<Arc<Mutex<AmqpProduceer>>> {
+    ) -> Result<Arc<ParkingLotMutex<AmqpProduceer>>> {
         let (host, username, password, port) = AmqpProduceer::parse_amqp_url(&url)?;
         if host.is_empty() || username.is_empty() || password.is_empty() || port == 0 {
             return Err(Box::new(AmqpError::ChannelUseError(format!(
@@ -585,7 +533,7 @@ impl AmqpConnectionManager {
             return Ok(producer.clone());
         }
 
-        let producer = Arc::new(Mutex::new(AmqpProduceer::new(
+        let producer = Arc::new(ParkingLotMutex::new(AmqpProduceer::new(
             url.clone(),
             self.cache.clone(),
         )));
@@ -634,10 +582,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_to_local_rabbitmq_rely_on_local_rabbitmq() {
-        let db = Arc::new(StdMutex::new(DB::new().unwrap()));
+        let db = Arc::new(ParkingLotMutex::new(DB::new().unwrap()));
         let mut producer = AmqpProduceer::new(
             TEST_RABBITMQ_URL.to_string(),
-            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
+            Arc::new(ParkingLotMutex::new(MemoryCache::new(1000, db.clone()))),
         );
 
         match producer.connect().await {
@@ -651,10 +599,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_produce_with_different_exchange_types_rely_on_local_rabbitmq() {
-        let db = Arc::new(StdMutex::new(DB::new().unwrap()));
+        let db = Arc::new(ParkingLotMutex::new(DB::new().unwrap()));
         let mut producer = AmqpProduceer::new(
             TEST_RABBITMQ_URL.to_string(),
-            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
+            Arc::new(ParkingLotMutex::new(MemoryCache::new(1000, db.clone()))),
         );
 
         let test_cases = vec![
@@ -695,10 +643,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_to_invalid_host() {
-        let db = Arc::new(StdMutex::new(DB::new().unwrap()));
+        let db = Arc::new(ParkingLotMutex::new(DB::new().unwrap()));
         let mut producer = AmqpProduceer::new(
             "amqp://guest:guest@non_existent_host:5672".to_string(),
-            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
+            Arc::new(ParkingLotMutex::new(MemoryCache::new(1000, db.clone()))),
         );
 
         match producer.connect().await {
@@ -711,8 +659,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_produce_with_cache() {
-        let db = Arc::new(StdMutex::new(DB::new().unwrap()));
-        let cache = Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone())));
+        let db = Arc::new(ParkingLotMutex::new(DB::new().unwrap()));
+        let cache = Arc::new(ParkingLotMutex::new(MemoryCache::new(1000, db.clone())));
         let mut producer = AmqpProduceer::new(
             "amqp://guest:guest@non_existent_host:5672".to_string(),
             cache.clone(),
@@ -746,10 +694,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_message_stats_rely_on_local_rabbitmq() {
-        let db = Arc::new(StdMutex::new(DB::new().unwrap()));
+        let db = Arc::new(ParkingLotMutex::new(DB::new().unwrap()));
         let mut producer = AmqpProduceer::new(
             TEST_RABBITMQ_URL.to_string(),
-            Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
+            Arc::new(ParkingLotMutex::new(MemoryCache::new(1000, db.clone()))),
         );
 
         let result = producer

@@ -7,14 +7,13 @@ mod models;
 
 use crate::amqp::CONNECTION_MANAGER;
 use crate::models::Message;
-use parking_lot::deadlock;
+use parking_lot::{deadlock, Mutex as ParkingLotMutex};
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
-use tokio::sync::Mutex;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -48,7 +47,7 @@ impl StatsKey {
 }
 
 lazy_static::lazy_static! {
-    static ref MESSAGE_STATS: Arc<Mutex<HashMap<StatsKey, MessageStats>>> = Arc::new(Mutex::new(HashMap::new()));
+    static ref MESSAGE_STATS: Arc<ParkingLotMutex<HashMap<StatsKey, MessageStats>>> = Arc::new(ParkingLotMutex::new(HashMap::new()));
 }
 
 async fn update_stats(url: &str, exchange: &str, routing_key: &str) {
@@ -66,51 +65,6 @@ async fn update_stats(url: &str, exchange: &str, routing_key: &str) {
 
     entry.count += 1;
     entry.timestamp = SystemTime::now();
-}
-
-async fn start_producer_background_tasks() {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            if let Err(e) = retry_message_count().await {
-                error!("Failed to retry cached messages: {}", e);
-            }
-        }
-    });
-}
-
-async fn retry_message_count() -> Result<()> {
-    let mut manager = CONNECTION_MANAGER.lock().await;
-    let messages = {
-        let db = manager.get_db();
-        let db = db.lock();
-        let db_messages = db.get_recent_messages(10).unwrap();
-        db_messages
-    };
-
-    for message in messages {
-        match manager.get_or_create_producer(message.url.clone()).await {
-            Ok(producer) => {
-                let mut producer = producer.lock().await;
-                if let Err(e) = producer
-                    .produce(
-                        &message.exchange,
-                        &message.exchange_type,
-                        &message.routing_key,
-                        message.message.as_bytes(),
-                        true,
-                    )
-                    .await
-                {
-                    error!("Failed to retry message: {}", e);
-                }
-            }
-            Err(e) => {
-                error!("Failed to get producer: {}", e);
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn produce_message(
@@ -172,7 +126,7 @@ async fn process_connection(mut stream: TcpStream) -> Result<()> {
 async fn start_report_task() {
     tokio::spawn(async move {
         loop {
-            time::sleep(Duration::from_secs(60)).await;
+            time::sleep(Duration::from_secs(20)).await;
             let manager = CONNECTION_MANAGER.lock().await;
             let (produce_reports, cache_report) = manager.generate_reports().await;
 
@@ -210,6 +164,7 @@ fn start_dead_lock_detection() {
                     error!("{:?}", thread.backtrace());
                 }
             }
+            panic!("deadlock detected");
         }
     });
 }
@@ -221,7 +176,6 @@ async fn main() -> Result<()> {
     logger::start_log_cleaner(settings.log.clone());
 
     start_dead_lock_detection();
-    start_producer_background_tasks().await;
     start_report_task().await;
 
     let addr = format!("{}:{}", settings.server.host, settings.server.port);
@@ -242,5 +196,38 @@ async fn main() -> Result<()> {
                 error!("Error accepting connection: {}", e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic]
+    fn test_deadlock() {
+        let lock1 = Arc::new(ParkingLotMutex::new(()));
+        let lock2 = Arc::new(ParkingLotMutex::new(()));
+
+        let l1 = Arc::clone(&lock1);
+        let l2 = Arc::clone(&lock2);
+
+        let t1 = thread::spawn(move || {
+            let _guard1 = l1.lock();
+            thread::sleep(Duration::from_millis(100));
+            let _guard2 = l2.lock();
+        });
+
+        let l1 = Arc::clone(&lock1);
+        let l2 = Arc::clone(&lock2);
+
+        let t2 = thread::spawn(move || {
+            let _guard2 = l2.lock();
+            thread::sleep(Duration::from_millis(100));
+            let _guard1 = l1.lock();
+        });
+
+        t1.join().unwrap();
+        t2.join().unwrap();
     }
 }

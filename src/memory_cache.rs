@@ -1,9 +1,8 @@
 use super::db::DB;
 use super::models::Message;
-use parking_lot::Mutex;
+use parking_lot::Mutex as ParkingLotMutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
@@ -13,11 +12,11 @@ pub struct MemoryCache {
     messages: HashMap<String, Message>,
     current_size: usize,
     max_size: usize,
-    db: Arc<Mutex<DB>>,
+    db: Arc<ParkingLotMutex<DB>>,
 }
 
 impl MemoryCache {
-    pub fn new(max_size: usize, db: Arc<Mutex<DB>>) -> Self {
+    pub fn new(max_size: usize, db: Arc<ParkingLotMutex<DB>>) -> Self {
         if max_size == 0 {
             panic!("Max size must be greater than 0");
         }
@@ -131,6 +130,7 @@ impl MemoryCache {
         self.current_size
     }
 
+    #[cfg(test)]
     pub fn get_message_by_locator(&self, locator: &str) -> Option<Message> {
         self.messages.get(locator).cloned()
     }
@@ -182,10 +182,10 @@ mod tests {
         }
     }
 
-    fn setup_test_cache(max_size: usize) -> (MemoryCache, Arc<Mutex<DB>>, String) {
+    fn setup_test_cache(max_size: usize) -> (MemoryCache, Arc<ParkingLotMutex<DB>>, String) {
         let db_path = format!("test_cache_db_{}.sqlite", rand::random::<u32>());
         let db = DB::new_with_path(&db_path).unwrap();
-        let db_arc = Arc::new(Mutex::new(db));
+        let db_arc = Arc::new(ParkingLotMutex::new(db));
         let cache = MemoryCache::new(max_size, db_arc.clone());
         (cache, db_arc, db_path)
     }

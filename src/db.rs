@@ -1,5 +1,4 @@
 use super::models::Message;
-use parking_lot::Mutex;
 use rusqlite::{params, Connection, Result};
 use std::fs;
 

@@ -1,7 +1,7 @@
 use crate::config::LogSettings;
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
+use parking_lot::Mutex as ParkingLotMutex;
 use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
@@ -9,7 +9,7 @@ use tracing_subscriber::{
 };
 
 lazy_static::lazy_static! {
-    static ref GUARD: Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> = Mutex::new(None);
+    static ref GUARD: ParkingLotMutex<Option<tracing_appender::non_blocking::WorkerGuard>> = ParkingLotMutex::new(None);
 }
 
 pub fn init_logger(
