@@ -176,6 +176,8 @@ async fn main() -> Result<()> {
     logger::init_logger(&settings.log)?;
     logger::start_log_cleaner(settings.log.clone());
 
+    info!("Logger initialized successfully");
+
     start_dead_lock_detection(Duration::from_secs(10));
     start_report_task().await;
 

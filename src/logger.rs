@@ -1,7 +1,7 @@
 use crate::config::LogSettings;
 use std::fs;
 use std::path::Path;
-use tokio::sync::Mutex as TokioMutex;
+use parking_lot::Mutex;
 use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
@@ -9,7 +9,7 @@ use tracing_subscriber::{
 };
 
 lazy_static::lazy_static! {
-    static ref GUARD: TokioMutex<Option<tracing_appender::non_blocking::WorkerGuard>> = TokioMutex::new(None);
+    static ref GUARD: Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> = Mutex::new(None);
 }
 
 pub fn init_logger(
@@ -34,7 +34,7 @@ pub fn init_logger(
         .filename_suffix("log")
         .build(&config.dir)?;
 
-    let (non_blocking, _) = tracing_appender::non_blocking(file_appender);
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking.with_max_level(level))
         .with_ansi(false)
@@ -53,6 +53,9 @@ pub fn init_logger(
         .with(file_layer)
         .with(stdout_layer)
         .init();
+
+    let mut guard_lock = GUARD.lock();
+    *guard_lock = Some(guard);
 
     Ok(())
 }
