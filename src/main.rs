@@ -7,13 +7,13 @@ mod models;
 
 use crate::amqp::CONNECTION_MANAGER;
 use crate::models::Message;
-use parking_lot::{deadlock, Mutex as ParkingLotMutex};
+use parking_lot::deadlock;
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
+use tokio::sync::Mutex as TokioMutex;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -47,7 +47,7 @@ impl StatsKey {
 }
 
 lazy_static::lazy_static! {
-    static ref MESSAGE_STATS: Arc<ParkingLotMutex<HashMap<StatsKey, MessageStats>>> = Arc::new(ParkingLotMutex::new(HashMap::new()));
+    static ref MESSAGE_STATS: Arc<TokioMutex<HashMap<StatsKey, MessageStats>>> = Arc::new(TokioMutex::new(HashMap::new()));
 }
 
 async fn update_stats(url: &str, exchange: &str, routing_key: &str) {
@@ -149,10 +149,10 @@ async fn start_report_task() {
     });
 }
 
-fn start_dead_lock_detection() {
+fn start_dead_lock_detection(period: Duration) {
     tokio::spawn(async move {
         loop {
-            thread::sleep(Duration::from_secs(1));
+            tokio::time::sleep(period).await;
             let deadlocks = deadlock::check_deadlock();
             if deadlocks.is_empty() {
                 continue;
@@ -172,10 +172,11 @@ fn start_dead_lock_detection() {
 #[tokio::main]
 async fn main() -> Result<()> {
     let settings = config::Settings::new()?;
+
     logger::init_logger(&settings.log)?;
     logger::start_log_cleaner(settings.log.clone());
 
-    start_dead_lock_detection();
+    start_dead_lock_detection(Duration::from_secs(10));
     start_report_task().await;
 
     let addr = format!("{}:{}", settings.server.host, settings.server.port);
@@ -202,10 +203,14 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex as ParkingLotMutex;
+    use std::thread;
 
     #[test]
     #[should_panic]
     fn test_deadlock() {
+        start_dead_lock_detection(Duration::from_secs(1));
+
         let lock1 = Arc::new(ParkingLotMutex::new(()));
         let lock2 = Arc::new(ParkingLotMutex::new(()));
 

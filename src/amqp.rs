@@ -1,3 +1,7 @@
+use crate::config;
+use crate::db::DB;
+use crate::memory_cache::MemoryCache;
+use crate::models::Message;
 use amqprs::{
     channel::{
         BasicPublishArguments, Channel, ConfirmSelectArguments, ExchangeDeclareArguments,
@@ -7,54 +11,31 @@ use amqprs::{
     error::Error as AmqpError,
     BasicProperties,
 };
-use parking_lot::{deadlock, Mutex as ParkingLotMutex};
+use parking_lot::Mutex as ParkingLotMutex;
 use std::collections::HashMap;
+use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{future::Future, pin::Pin};
+use tokio::sync::Mutex as TokioMutex;
 use tokio::time::{self, Instant};
 use tracing::{debug, error, info, warn};
 use url::Url;
-
-use crate::config;
-use crate::db::DB;
-use crate::memory_cache::MemoryCache;
-use crate::models::Message;
-use std::error::Error;
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::{future::Future, pin::Pin};
 
 const MAX_CONNECT_RETRIES: u32 = 3;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 lazy_static::lazy_static! {
-    pub static ref CONNECTION_MANAGER: Arc<ParkingLotMutex<AmqpConnectionManager>> = {
-
-        std::thread::spawn(move || {
-            loop {
-                std::thread::sleep(Duration::from_secs(10));
-                let deadlocks = deadlock::check_deadlock();
-                if deadlocks.is_empty() {
-                    continue;
-                }
-
-                error!("{} deadlocks detected", deadlocks.len());
-                for deadlock in deadlocks {
-                    error!("Deadlock threads:");
-                    for thread in deadlock {
-                        error!("Thread Id {:#?}", thread.thread_id());
-                        error!("Backtrace: {:#?}", thread.backtrace());
-                    }
-                }
-            }
-        });
-
+    pub static ref CONNECTION_MANAGER: Arc<TokioMutex<AmqpConnectionManager>> = {
         let settings = config::Settings::new().expect("Failed to load config");
         let cache_size = config::parse_size(&settings.cache.max_size)
             .expect("Failed to parse cache size");
         let db = Arc::new(ParkingLotMutex::new(DB::new().expect("Failed to create DB")));
         let cache = Arc::new(ParkingLotMutex::new(MemoryCache::new(cache_size, db.clone())));
-        Arc::new(ParkingLotMutex::new(AmqpConnectionManager::new(db, cache)))
+
+        Arc::new(   TokioMutex::new(AmqpConnectionManager::new(db, cache)))
     };
 }
 
@@ -436,7 +417,7 @@ impl AmqpProduceer {
         Ok(())
     }
 
-    pub async fn start_retry_task(producer: Arc<ParkingLotMutex<AmqpProduceer>>) {
+    pub async fn start_retry_task(producer: Arc<TokioMutex<AmqpProduceer>>) {
         tokio::spawn(async move {
             loop {
                 time::sleep(Duration::from_secs(5)).await;
@@ -448,7 +429,7 @@ impl AmqpProduceer {
         });
     }
 
-    pub async fn start_heartbeat_task(producer: Arc<ParkingLotMutex<AmqpProduceer>>) {
+    pub async fn start_heartbeat_task(producer: Arc<TokioMutex<AmqpProduceer>>) {
         tokio::spawn(async move {
             loop {
                 time::sleep(Duration::from_secs(15)).await;
@@ -488,7 +469,7 @@ impl AmqpProduceer {
 }
 
 pub struct AmqpConnectionManager {
-    producers: HashMap<String, Arc<ParkingLotMutex<AmqpProduceer>>>,
+    producers: HashMap<String, Arc<TokioMutex<AmqpProduceer>>>,
     db: Arc<ParkingLotMutex<DB>>,
     cache: Arc<ParkingLotMutex<MemoryCache>>,
 }
@@ -520,7 +501,7 @@ impl AmqpConnectionManager {
     pub async fn get_or_create_producer(
         &mut self,
         url: String,
-    ) -> Result<Arc<ParkingLotMutex<AmqpProduceer>>> {
+    ) -> Result<Arc<TokioMutex<AmqpProduceer>>> {
         let (host, username, password, port) = AmqpProduceer::parse_amqp_url(&url)?;
         if host.is_empty() || username.is_empty() || password.is_empty() || port == 0 {
             return Err(Box::new(AmqpError::ChannelUseError(format!(
@@ -533,7 +514,7 @@ impl AmqpConnectionManager {
             return Ok(producer.clone());
         }
 
-        let producer = Arc::new(ParkingLotMutex::new(AmqpProduceer::new(
+        let producer = Arc::new(TokioMutex::new(AmqpProduceer::new(
             url.clone(),
             self.cache.clone(),
         )));
