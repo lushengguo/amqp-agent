@@ -85,6 +85,25 @@ impl DB {
         Ok(messages)
     }
 
+    pub fn remove_message(&mut self, messages: &[Message]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            // since message already been buffered, there is no need to publish two or more same data to the same exchange
+            // and exchange could not have two types at the same time
+            let mut stmt = tx.prepare("DELETE FROM messages WHERE url = ?1 AND exchange = ?2 AND routing_key = ?3 AND message = ?4")?;
+            for message in messages {
+                stmt.execute(params![
+                    message.url,
+                    message.exchange,
+                    message.routing_key,
+                    message.message
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn clear_all(&self) -> Result<()> {
         self.conn.execute("DELETE FROM messages", [])?;
@@ -436,6 +455,29 @@ mod tests {
                 assert_eq!(thread_messages.len(), 20);
             }
         }
+
+        cleanup_test_db(&db_path);
+    }
+
+    #[test]
+    pub fn test_remove_message() {
+        let (mut db, db_path) = setup_test_db();
+
+        let messages = vec![
+            create_test_message("exchange1", "key1", "Message 1"),
+            create_test_message("exchange2", "key1", "Message 2"),
+        ];
+
+        db.batch_insert(&messages).unwrap();
+
+        let all_messages = db.get_recent_messages(10).unwrap();
+        assert_eq!(all_messages.len(), 2);
+
+        db.remove_message(&[messages[0].clone()]).unwrap();
+
+        let remaining_messages = db.get_recent_messages(10).unwrap();
+        assert_eq!(remaining_messages.len(), 1);
+        assert_eq!(remaining_messages[0].message, "Message 2");
 
         cleanup_test_db(&db_path);
     }

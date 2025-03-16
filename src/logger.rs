@@ -24,12 +24,12 @@ pub fn init_logger(
         _ => Level::INFO,
     };
 
-    // 创建日志目录（如果不存在）
+    
     if !Path::new(&config.dir).exists() {
         fs::create_dir_all(&config.dir)?;
     }
 
-    // 配置每日轮转的日志文件
+    
     let file_appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix("app")
@@ -39,16 +39,16 @@ pub fn init_logger(
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking.with_max_level(level))
-        .with_ansi(false)  // 禁用 ANSI 转义序列
-        .with_target(false)  // 不显示目标模块
-        .with_thread_ids(true)  // 显示线程ID
-        .with_thread_names(true)  // 显示线程名称
-        .with_file(true)  // 显示文件名
-        .with_line_number(true);  // 显示行号
+        .with_ansi(false)  
+        .with_target(false)  
+        .with_thread_ids(true)  
+        .with_thread_names(true)  
+        .with_file(true)  
+        .with_line_number(true);  
 
     let stdout_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stdout.with_max_level(level))
-        .with_target(false);  // 控制台输出也不显示目标模块
+        .with_target(false);  
 
     tracing_subscriber::registry()
         .with(EnvFilter::from_default_env().add_directive(level.into()))
@@ -56,7 +56,7 @@ pub fn init_logger(
         .with(stdout_layer)
         .init();
 
-    // 保存 guard 到全局变量
+    
     *GUARD.lock().unwrap() = Some(guard);
 
     Ok(())
@@ -68,7 +68,7 @@ pub fn start_log_cleaner(config: LogSettings) {
             if let Err(e) = clean_old_logs(&config).await {
                 tracing::error!("Error cleaning old log files: {}", e);
             }
-            // 每天检查一次
+            
             tokio::time::sleep(tokio::time::Duration::from_secs(86400)).await;
         }
     });
@@ -93,10 +93,10 @@ async fn clean_old_logs(
         })
         .collect();
 
-    // 按修改时间排序，最新的在后面
+    
     files.sort_by_key(|entry| entry.metadata().unwrap().modified().unwrap());
 
-    // 如果文件数超过限制，删除最旧的文件
+    
     if files.len() > max_files as usize {
         for file in files.iter().take(files.len() - max_files as usize) {
             if let Err(e) = fs::remove_file(file.path()) {

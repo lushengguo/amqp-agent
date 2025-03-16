@@ -75,7 +75,7 @@ impl MemoryCache {
         }
     }
 
-    pub fn get_recent(&self, n: usize) -> Vec<Message> {
+    pub fn get_recent_messages(&self, n: usize) -> Vec<Message> {
         let mut result = self
             .messages
             .iter()
@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(cache.memory_usage(), msg_size);
         assert!(cache.messages.contains_key(&timestamp));
 
-        let recent_messages = cache.get_recent(10);
+        let recent_messages = cache.get_recent_messages(10);
         assert_eq!(recent_messages.len(), 1);
         assert_eq!(recent_messages[0].exchange, "test_exchange");
         assert_eq!(recent_messages[0].routing_key, "test_key");
@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(removed.unwrap().routing_key, "test_key");
 
         assert_eq!(cache.memory_usage(), 0);
-        assert_eq!(cache.get_recent(10).len(), 0);
+        assert_eq!(cache.get_recent_messages(10).len(), 0);
 
         let not_found = cache.remove(12345);
         assert!(not_found.is_none());
@@ -263,7 +263,7 @@ mod tests {
 
         assert_eq!(cache.memory_usage(), total_size);
 
-        let messages = cache.get_recent(10);
+        let messages = cache.get_recent_messages(10);
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].routing_key, "key_3");
         assert_eq!(messages[1].routing_key, "key_1");
@@ -474,7 +474,7 @@ mod tests {
             db.batch_insert(&db_messages).unwrap();
         }
 
-        let recent_messages = cache.get_recent(5);
+        let recent_messages = cache.get_recent_messages(5);
 
         assert_eq!(
             recent_messages.len(),
@@ -516,7 +516,7 @@ mod tests {
             db.batch_insert(&vec![test_message.clone()]).unwrap();
         }
 
-        let recent_messages = cache.get_recent(2);
+        let recent_messages = cache.get_recent_messages(2);
 
         assert_eq!(recent_messages.len(), 1, "相同的消息不应该重复返回");
         assert_eq!(

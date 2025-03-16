@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::{self, Instant};
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, debug};
 use url::Url;
 
 use crate::config;
@@ -217,7 +217,7 @@ impl AmqpProduceer {
         message: &[u8],
         is_retry: bool,
     ) -> Result<()> {
-        // Update message stats
+        
         let stats_key = Self::get_stats_key(exchange, routing_key);
         let stats = self
             .message_stats
@@ -259,7 +259,7 @@ impl AmqpProduceer {
         }
 
         let log_prefix = if is_retry { "[RETRY]" } else { "" };
-        info!(
+        debug!(
             "{}Preparing to send message - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes",
             log_prefix,
             exchange,
@@ -277,7 +277,7 @@ impl AmqpProduceer {
             .await
         {
             Ok(_) => {
-                info!(
+                debug!(
                     "{}Message sent successfully - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes",
                     log_prefix,
                     exchange,
@@ -286,7 +286,7 @@ impl AmqpProduceer {
                     message.len()
                 );
                 self.last_heartbeat = Some(Instant::now());
-                // Update success count in stats
+                
                 if let Some(stats) = self.message_stats.get_mut(&stats_key) {
                     stats.total_success += 1;
                 }
@@ -373,7 +373,7 @@ impl AmqpProduceer {
 
         let messages = {
             let cache = self.cache.lock().unwrap();
-            cache.get_recent(1000)
+            cache.get_recent_messages(1000)
         };
 
         for message in messages {
@@ -526,13 +526,17 @@ impl AmqpConnectionManager {
             produce_report.extend(producer_guard.generate_report());
         }
 
+        let in_memory_message_count = self.cache.lock().unwrap().message_count() as u64;
+        let memory_usage = self.cache.lock().unwrap().memory_usage() as u64;
+        let in_disk_message_count = self.db.lock().unwrap().message_count().unwrap() as u64;
+        let disk_usage = self.db.lock().unwrap().disk_usage().unwrap() as u64;
         (
             produce_report,
             CacheReport {
-                in_memory_message_count: self.cache.lock().unwrap().message_count() as u64,
-                memory_usage: self.cache.lock().unwrap().memory_usage() as u64,
-                in_disk_message_count: self.db.lock().unwrap().message_count().unwrap() as u64,
-                disk_usage: self.db.lock().unwrap().disk_usage().unwrap() as u64,
+                in_memory_message_count,
+                memory_usage,
+                in_disk_message_count,
+                disk_usage,
             },
         )
     }
@@ -545,7 +549,7 @@ mod tests {
     const TEST_RABBITMQ_URL: &str = "amqp://guest:guest@localhost:5672";
 
     #[tokio::test]
-    async fn test_connect_to_local_rabbitmq() {
+    async fn test_connect_to_local_rabbitmq_rely_on_local_rabbitmq() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
         let mut producer = AmqpProduceer::new(
             TEST_RABBITMQ_URL.to_string(),
@@ -562,7 +566,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_produce_with_different_exchange_types() {
+    async fn test_produce_with_different_exchange_types_rely_on_local_rabbitmq() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
         let mut producer = AmqpProduceer::new(
             TEST_RABBITMQ_URL.to_string(),
@@ -648,7 +652,7 @@ mod tests {
             Ok(_) => assert!(false, "Should not connect to invalid host"),
             Err(_) => {
                 let cache_guard = cache.lock().unwrap();
-                let messages = cache_guard.get_recent(10);
+                let messages = cache_guard.get_recent_messages(10);
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].exchange, "test_exchange");
                 assert_eq!(messages[0].routing_key, "test.key");
@@ -657,14 +661,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_message_stats() {
+    async fn test_message_stats_rely_on_local_rabbitmq() {
         let db = Arc::new(StdMutex::new(DB::new().unwrap()));
         let mut producer = AmqpProduceer::new(
             TEST_RABBITMQ_URL.to_string(),
             Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
         );
 
-        // Send a test message
+        
         let result = producer
             .produce(
                 "test_exchange",
@@ -675,10 +679,10 @@ mod tests {
             )
             .await;
 
-        // Get the report
+        
         let report = producer.generate_report();
 
-        // Check if stats were recorded
+        
         assert!(!report.is_empty());
         let PeriodProduceReport {
             url,
