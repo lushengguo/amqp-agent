@@ -86,12 +86,12 @@ impl DB {
         Ok(messages)
     }
 
-    pub fn remove_message(&mut self, messages: &[Message]) -> Result<()> {
+    pub fn remove_message(&mut self, locators: &[String]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
             let mut stmt = tx.prepare("DELETE FROM messages WHERE locator = ?1")?;
-            for message in messages {
-                stmt.execute(params![message.locator()])?;
+            for locator in locators {
+                stmt.execute(params![locator])?;
             }
         }
         tx.commit()?;
@@ -308,7 +308,7 @@ mod tests {
         let all_messages = db.get_recent_messages(10).unwrap();
         assert_eq!(all_messages.len(), 2);
 
-        db.remove_message(&[messages[0].clone()]).unwrap();
+        db.remove_message(&[messages[0].locator()]).unwrap();
 
         let remaining_messages = db.get_recent_messages(10).unwrap();
         assert_eq!(remaining_messages.len(), 1);

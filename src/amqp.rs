@@ -342,6 +342,10 @@ impl AmqpProduceer {
         };
 
         let mut cache = self.cache.lock().unwrap();
+        let locator = message.locator();
+        let exchange_clone = message.exchange.clone();
+        let routing_key_clone = message.routing_key.clone();
+        
         cache.insert(message);
         info!(
             "Message cached successfully - Exchange: {} ({}), RoutingKey: {}, Current memory usage: {} bytes, cached {} messages",
@@ -351,6 +355,12 @@ impl AmqpProduceer {
             cache.memory_usage(),
             cache.message_count()
         );
+        info!(
+            "Removing message from cache - Exchange: {}, RoutingKey: {}, Total messages in cache: {}",
+            exchange_clone, routing_key_clone,
+            cache.message_count()
+        );
+        cache.remove(&locator);
         Ok(())
     }
 
@@ -389,12 +399,14 @@ impl AmqpProduceer {
             {
                 Ok(_) => {
                     let mut cache = self.cache.lock().unwrap();
-                    cache.remove(message.timestamp);
+                    let locator = message.locator();
+                    let exchange = message.exchange.clone();
+                    let routing_key = message.routing_key.clone();
                     info!(
                         "[RETRY] Successfully removed message from cache - Exchange: {}, RoutingKey: {}",
-                        message.exchange,
-                        message.routing_key
+                        exchange, routing_key
                     );
+                    cache.remove(&locator);
                 }
                 Err(e) => {
                     error!("[RETRY] Failed to retry message: {}", e);
@@ -453,6 +465,40 @@ impl AmqpProduceer {
             }
         }
         report
+    }
+
+    fn remove_from_cache(&mut self, message: Message) -> Result<()> {
+        let locator = message.locator();
+        let exchange = message.exchange.clone();
+        let routing_key = message.routing_key.clone();
+        
+        let mut cache = self.cache.lock().unwrap();
+        info!(
+            "Removing message from cache - Exchange: {}, RoutingKey: {}, Total messages in cache: {}",
+            exchange, routing_key,
+            cache.message_count()
+        );
+        cache.remove(&locator);
+        Ok(())
+    }
+
+    async fn retry_send(&mut self, message: Message) -> Result<()> {
+        let locator = message.locator();
+        let exchange = message.exchange.clone();
+        let routing_key = message.routing_key.clone();
+        
+        match self.produce(&message.exchange, &message.exchange_type, &message.routing_key, message.message.as_bytes(), true).await {
+            Ok(_) => {
+                let mut cache = self.cache.lock().unwrap();
+                info!(
+                    "[RETRY] Successfully removed message from cache - Exchange: {}, RoutingKey: {}",
+                    exchange, routing_key
+                );
+                cache.remove(&locator);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
