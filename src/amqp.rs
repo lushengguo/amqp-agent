@@ -426,7 +426,7 @@ impl AmqpProduceer {
                 time::sleep(Duration::from_secs(5)).await;
                 let mut producer = producer.lock().await;
                 if let Err(e) = producer.retry_produce_cached_messages().await {
-                    error!("Failed to retry cached messages: {}", e);
+                    error!("Failed to retry produce cached messages: {}", e);
                 }
             }
         });
