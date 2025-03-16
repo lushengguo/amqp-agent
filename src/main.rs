@@ -7,9 +7,11 @@ mod models;
 
 use crate::amqp::CONNECTION_MANAGER;
 use crate::models::Message;
+use parking_lot::deadlock;
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use tokio::sync::Mutex;
@@ -81,8 +83,9 @@ async fn retry_message_count() -> Result<()> {
     let mut manager = CONNECTION_MANAGER.lock().await;
     let messages = {
         let db = manager.get_db();
-        let db = db.lock().unwrap();
-        db.get_recent_messages(100)?
+        let db = db.lock();
+        let db_messages = db.get_recent_messages(10).unwrap();
+        db_messages
     };
 
     for message in messages {
@@ -192,14 +195,32 @@ async fn start_report_task() {
     });
 }
 
+fn start_dead_lock_detection() {
+    tokio::spawn(async move {
+        loop {
+            thread::sleep(Duration::from_secs(1));
+            let deadlocks = deadlock::check_deadlock();
+            if deadlocks.is_empty() {
+                continue;
+            }
+            debug!("detect {} deadlock!", deadlocks.len());
+            for (i, threads) in deadlocks.iter().enumerate() {
+                println!("deadlock {} related threads:", i);
+                for thread in threads {
+                    error!("{:?}", thread.backtrace());
+                }
+            }
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let settings = config::Settings::new()?;
-
     logger::init_logger(&settings.log)?;
-
     logger::start_log_cleaner(settings.log.clone());
 
+    start_dead_lock_detection();
     start_producer_background_tasks().await;
     start_report_task().await;
 

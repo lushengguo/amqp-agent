@@ -1,4 +1,5 @@
 use super::models::Message;
+use parking_lot::Mutex;
 use rusqlite::{params, Connection, Result};
 use std::fs;
 
@@ -98,27 +99,27 @@ impl DB {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn get_message_by_locator(&self, locator: &str) -> Result<Option<Message>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT url, exchange, routing_key, message, timestamp, exchange_type 
-             FROM messages 
-             WHERE locator = ?",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM messages WHERE locator = ?1")?;
+        let message = stmt.query_row([locator], |row| {
+            Ok(Message {
+                url: row.get(1)?,
+                exchange: row.get(2)?,
+                exchange_type: row.get(3)?,
+                routing_key: row.get(4)?,
+                message: row.get(5)?,
+                timestamp: row.get(6)?,
+            })
+        });
 
-        let mut messages = stmt
-            .query_map(params![locator], |row| {
-                Ok(Message {
-                    url: row.get(0)?,
-                    exchange: row.get(1)?,
-                    routing_key: row.get(2)?,
-                    message: row.get(3)?,
-                    timestamp: row.get(4)?,
-                    exchange_type: row.get(5)?,
-                })
-            })?
-            .collect::<Result<Vec<Message>>>()?;
-
-        Ok(messages.pop())
+        match message {
+            Ok(message) => Ok(Some(message)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     #[cfg(test)]
@@ -324,17 +325,13 @@ mod tests {
         let message = create_test_message("exchange1", "key1", "Message 1");
         let locator = message.locator();
 
-        // 第一次插入
         db.batch_insert(&[message.clone()]).unwrap();
 
-        // 第二次插入相同的消息
         db.batch_insert(&[message.clone()]).unwrap();
 
-        // 验证只存在一条记录
         let count = db.message_count().unwrap();
         assert_eq!(count, 1);
 
-        // 验证消息内容正确
         let stored_message = db.get_message_by_locator(&locator).unwrap().unwrap();
         assert_eq!(stored_message.exchange, "exchange1");
         assert_eq!(stored_message.routing_key, "key1");
@@ -347,20 +344,16 @@ mod tests {
     fn test_locator_uniqueness() {
         let (mut db, db_path) = setup_test_db();
 
-        // 创建两条内容相同但时间戳不同的消息
         let message1 = create_test_message("exchange1", "key1", "Same content");
         std::thread::sleep(std::time::Duration::from_secs(1));
         let message2 = create_test_message("exchange1", "key1", "Same content");
 
-        // 它们应该有相同的 locator
         assert_eq!(message1.locator(), message2.locator());
 
-        // 插入第一条消息
         db.batch_insert(&[message1]).unwrap();
         let count1 = db.message_count().unwrap();
         assert_eq!(count1, 1);
 
-        // 插入第二条消息（应该替换第一条）
         db.batch_insert(&[message2]).unwrap();
         let count2 = db.message_count().unwrap();
         assert_eq!(count2, 1);
@@ -372,7 +365,6 @@ mod tests {
     fn test_get_nonexistent_message() {
         let (db, db_path) = setup_test_db();
 
-        // 尝试获取不存在的消息
         let result = db.get_message_by_locator("nonexistent_locator").unwrap();
         assert!(result.is_none());
 
@@ -384,7 +376,6 @@ mod tests {
         let base_message = create_test_message("exchange1", "key1", "Message 1");
         let base_locator = base_message.locator();
 
-        // 测试不同字段的变化会产生不同的 locator
         let mut diff_url = base_message.clone();
         diff_url.url = "amqp://different:5672".to_string();
         assert_ne!(diff_url.locator(), base_locator);
@@ -405,7 +396,6 @@ mod tests {
         diff_message.message = "Different message".to_string();
         assert_ne!(diff_message.locator(), base_locator);
 
-        // 时间戳不应该影响 locator
         let mut diff_timestamp = base_message.clone();
         diff_timestamp.timestamp = 12345;
         assert_eq!(diff_timestamp.locator(), base_locator);

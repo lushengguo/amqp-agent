@@ -7,12 +7,13 @@ use amqprs::{
     error::Error as AmqpError,
     BasicProperties,
 };
+use parking_lot::{deadlock, Mutex as StdMutex};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::{self, Instant};
-use tracing::{error, info, warn, debug};
+use tracing::{debug, error, info, warn};
 use url::Url;
 
 use crate::config;
@@ -24,11 +25,33 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{future::Future, pin::Pin};
 
 const MAX_CONNECT_RETRIES: u32 = 3;
+#[cfg(test)]
+const MUTEX_TIMEOUT: Duration = Duration::from_secs(5);
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 lazy_static::lazy_static! {
     pub static ref CONNECTION_MANAGER: Arc<Mutex<AmqpConnectionManager>> = {
+
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(10));
+                let deadlocks = deadlock::check_deadlock();
+                if deadlocks.is_empty() {
+                    continue;
+                }
+
+                error!("{} deadlocks detected", deadlocks.len());
+                for deadlock in deadlocks {
+                    error!("Deadlock threads:");
+                    for thread in deadlock {
+                        error!("Thread Id {:#?}", thread.thread_id());
+                        error!("Backtrace: {:#?}", thread.backtrace());
+                    }
+                }
+            }
+        });
+
         let settings = config::Settings::new().expect("Failed to load config");
         let cache_size = config::parse_size(&settings.cache.max_size)
             .expect("Failed to parse cache size");
@@ -217,7 +240,6 @@ impl AmqpProduceer {
         message: &[u8],
         is_retry: bool,
     ) -> Result<()> {
-        
         let stats_key = Self::get_stats_key(exchange, routing_key);
         let stats = self
             .message_stats
@@ -286,7 +308,7 @@ impl AmqpProduceer {
                     message.len()
                 );
                 self.last_heartbeat = Some(Instant::now());
-                
+
                 if let Some(stats) = self.message_stats.get_mut(&stats_key) {
                     stats.total_success += 1;
                 }
@@ -341,11 +363,11 @@ impl AmqpProduceer {
                 .as_secs() as u32,
         };
 
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock();
         let locator = message.locator();
         let exchange_clone = message.exchange.clone();
         let routing_key_clone = message.routing_key.clone();
-        
+
         cache.insert(message);
         info!(
             "Message cached successfully - Exchange: {} ({}), RoutingKey: {}, Current memory usage: {} bytes, cached {} messages",
@@ -382,7 +404,7 @@ impl AmqpProduceer {
         }
 
         let messages = {
-            let cache = self.cache.lock().unwrap();
+            let cache = self.cache.lock();
             cache.get_recent_messages(1000)
         };
 
@@ -398,7 +420,7 @@ impl AmqpProduceer {
                 .await
             {
                 Ok(_) => {
-                    let mut cache = self.cache.lock().unwrap();
+                    let mut cache = self.cache.lock();
                     let locator = message.locator();
                     let exchange = message.exchange.clone();
                     let routing_key = message.routing_key.clone();
@@ -467,12 +489,13 @@ impl AmqpProduceer {
         report
     }
 
+    #[cfg(test)]
     fn remove_from_cache(&mut self, message: Message) -> Result<()> {
         let locator = message.locator();
         let exchange = message.exchange.clone();
         let routing_key = message.routing_key.clone();
-        
-        let mut cache = self.cache.lock().unwrap();
+
+        let mut cache = self.cache.lock();
         info!(
             "Removing message from cache - Exchange: {}, RoutingKey: {}, Total messages in cache: {}",
             exchange, routing_key,
@@ -482,14 +505,24 @@ impl AmqpProduceer {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn retry_send(&mut self, message: Message) -> Result<()> {
         let locator = message.locator();
         let exchange = message.exchange.clone();
         let routing_key = message.routing_key.clone();
-        
-        match self.produce(&message.exchange, &message.exchange_type, &message.routing_key, message.message.as_bytes(), true).await {
+
+        match self
+            .produce(
+                &message.exchange,
+                &message.exchange_type,
+                &message.routing_key,
+                message.message.as_bytes(),
+                true,
+            )
+            .await
+        {
             Ok(_) => {
-                let mut cache = self.cache.lock().unwrap();
+                let mut cache = self.cache.lock();
                 info!(
                     "[RETRY] Successfully removed message from cache - Exchange: {}, RoutingKey: {}",
                     exchange, routing_key
@@ -572,10 +605,15 @@ impl AmqpConnectionManager {
             produce_report.extend(producer_guard.generate_report());
         }
 
-        let in_memory_message_count = self.cache.lock().unwrap().message_count() as u64;
-        let memory_usage = self.cache.lock().unwrap().memory_usage() as u64;
-        let in_disk_message_count = self.db.lock().unwrap().message_count().unwrap() as u64;
-        let disk_usage = self.db.lock().unwrap().disk_usage().unwrap() as u64;
+        let cache = self.cache.lock();
+        let in_memory_message_count = cache.message_count() as u64;
+        let memory_usage = cache.memory_usage() as u64;
+        drop(cache);
+
+        let db = self.db.lock();
+        let in_disk_message_count = db.message_count().unwrap() as u64;
+        let disk_usage = db.disk_usage().unwrap() as u64;
+
         (
             produce_report,
             CacheReport {
@@ -690,14 +728,14 @@ mod tests {
         };
 
         {
-            let mut cache_guard = cache.lock().unwrap();
+            let mut cache_guard = cache.lock();
             cache_guard.insert(test_message.clone());
         }
 
         match producer.connect().await {
             Ok(_) => assert!(false, "Should not connect to invalid host"),
             Err(_) => {
-                let cache_guard = cache.lock().unwrap();
+                let cache_guard = cache.lock();
                 let messages = cache_guard.get_recent_messages(10);
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].exchange, "test_exchange");
@@ -714,7 +752,6 @@ mod tests {
             Arc::new(StdMutex::new(MemoryCache::new(1000, db.clone()))),
         );
 
-        
         let result = producer
             .produce(
                 "test_exchange",
@@ -725,10 +762,8 @@ mod tests {
             )
             .await;
 
-        
         let report = producer.generate_report();
 
-        
         assert!(!report.is_empty());
         let PeriodProduceReport {
             url,

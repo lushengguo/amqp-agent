@@ -1,8 +1,13 @@
 use super::db::DB;
 use super::models::Message;
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use tracing::{info, warn};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+use tracing::{error, info, warn};
+
+const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct MemoryCache {
     messages: HashMap<String, Message>,
@@ -42,7 +47,6 @@ impl MemoryCache {
         let locator = message.locator();
         let message_size = Self::calculate_message_size(&message);
 
-        // 如果消息已存在，先移除旧消息
         if let Some(old_message) = self.messages.get(&locator) {
             self.current_size -= Self::calculate_message_size(old_message);
         }
@@ -60,7 +64,6 @@ impl MemoryCache {
         let mut to_remove = Vec::new();
         let mut to_db = Vec::new();
 
-        // 按时间戳排序，将最旧的消息刷入数据库
         let mut messages: Vec<_> = self.messages.values().collect();
         messages.sort_by_key(|msg| msg.timestamp);
 
@@ -69,17 +72,24 @@ impl MemoryCache {
             to_db.push((*message).clone());
         }
 
-        if let Ok(mut db) = self.db.lock() {
-            if let Err(e) = db.batch_insert(&to_db) {
-                warn!("Failed to flush data to database: {}", e);
-            } else {
-                info!("Successfully flushed {} messages to database", to_db.len());
+        match self.db.try_lock_for(LOCK_TIMEOUT) {
+            Some(mut db) => {
+                if let Err(e) = db.batch_insert(&to_db) {
+                    warn!("Failed to flush data to database: {}", e);
+                } else {
+                    info!("Successfully flushed {} messages to database", to_db.len());
 
-                for locator in to_remove {
-                    if let Some(message) = self.messages.remove(&locator) {
-                        self.current_size -= Self::calculate_message_size(&message);
+                    for locator in to_remove {
+                        if let Some(message) = self.messages.remove(&locator) {
+                            self.current_size -= Self::calculate_message_size(&message);
+                        }
                     }
                 }
+            }
+            None => {
+                let bt = std::backtrace::Backtrace::capture();
+                error!("Deadlock detected in flush_oldest_to_db: {:?}", bt);
+                panic!("Deadlock detected while trying to acquire database lock");
             }
         }
     }
@@ -90,19 +100,26 @@ impl MemoryCache {
         result.truncate(n);
 
         if result.len() < n {
-            if let Ok(db) = self.db.lock() {
-                if let Ok(db_messages) = db.get_recent_messages((n - result.len()) as u64) {
-                    let cache_locators: std::collections::HashSet<_> =
-                        result.iter().map(|msg| msg.locator()).collect();
+            match self.db.try_lock_for(LOCK_TIMEOUT) {
+                Some(db) => {
+                    if let Ok(db_messages) = db.get_recent_messages((n - result.len()) as u64) {
+                        let cache_locators: std::collections::HashSet<_> =
+                            result.iter().map(|msg| msg.locator()).collect();
 
-                    let mut additional_messages: Vec<_> = db_messages
-                        .into_iter()
-                        .filter(|msg| !cache_locators.contains(&msg.locator()))
-                        .collect();
+                        let mut additional_messages: Vec<_> = db_messages
+                            .into_iter()
+                            .filter(|msg| !cache_locators.contains(&msg.locator()))
+                            .collect();
 
-                    result.append(&mut additional_messages);
-                    result.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-                    result.truncate(n);
+                        result.append(&mut additional_messages);
+                        result.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+                        result.truncate(n);
+                    }
+                }
+                None => {
+                    let bt = std::backtrace::Backtrace::capture();
+                    error!("Deadlock detected in get_recent_messages: {:?}", bt);
+                    panic!("Deadlock detected while trying to acquire database lock");
                 }
             }
         }
@@ -119,14 +136,21 @@ impl MemoryCache {
     }
 
     pub fn remove(&mut self, locator: &str) -> Option<Message> {
-        let mut db = self.db.lock().unwrap();
-        db.remove_message(&[locator.to_string()]).unwrap();
-
-        if let Some(message) = self.messages.remove(locator) {
-            self.current_size -= Self::calculate_message_size(&message);
-            Some(message)
-        } else {
-            None
+        match self.db.try_lock_for(LOCK_TIMEOUT) {
+            Some(mut db) => {
+                db.remove_message(&[locator.to_string()]).unwrap();
+                if let Some(message) = self.messages.remove(locator) {
+                    self.current_size -= Self::calculate_message_size(&message);
+                    Some(message)
+                } else {
+                    None
+                }
+            }
+            None => {
+                let bt = std::backtrace::Backtrace::capture();
+                error!("Deadlock detected in remove: {:?}", bt);
+                panic!("Deadlock detected while trying to acquire database lock");
+            }
         }
     }
 }
@@ -207,17 +231,14 @@ mod tests {
         let locator = message.locator();
         let msg_size = MemoryCache::calculate_message_size(&message);
 
-        // 第一次插入
         cache.insert(message.clone());
         assert_eq!(cache.memory_usage(), msg_size);
         assert_eq!(cache.message_count(), 1);
 
-        // 第二次插入相同消息
         cache.insert(message);
         assert_eq!(cache.memory_usage(), msg_size);
         assert_eq!(cache.message_count(), 1);
 
-        // 验证消息内容
         let stored_message = cache.get_message_by_locator(&locator).unwrap();
         assert_eq!(stored_message.exchange, "test_exchange");
         assert_eq!(stored_message.routing_key, "test_key");
@@ -259,10 +280,9 @@ mod tests {
             cache.insert(message);
         }
 
-        // 验证部分消息已经被刷入数据库
         assert!(cache.memory_usage() <= cache.max_size);
 
-        let db = db_arc.lock().unwrap();
+        let db = db_arc.lock();
         let db_messages = db.get_recent_messages(10).unwrap();
         assert!(!db_messages.is_empty());
 

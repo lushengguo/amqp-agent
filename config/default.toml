@@ -4,7 +4,7 @@ port = 8080
 
 [log]
 dir = "logs"
-level = "info"
+level = "debug"
 max_files = 10
 
 [cache]
