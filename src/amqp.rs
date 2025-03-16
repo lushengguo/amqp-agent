@@ -40,24 +40,24 @@ lazy_static::lazy_static! {
 }
 
 #[derive(Debug, Clone)]
-struct MessageStats {
+struct MessageStatistic {
     url: String,
     exchange: String,
     routing_key: String,
-    total_sent: u64,
-    total_success: u64,
-    last_updated: Instant,
+    produced: u64,
+    confirmed: u64,
+    update_timestamp: Instant,
 }
 
-impl MessageStats {
+impl MessageStatistic {
     fn new(url: String, exchange: String, routing_key: String) -> Self {
         Self {
             url,
             exchange,
             routing_key,
-            total_sent: 0,
-            total_success: 0,
-            last_updated: Instant::now(),
+            produced: 0,
+            confirmed: 0,
+            update_timestamp: Instant::now(),
         }
     }
 }
@@ -66,10 +66,10 @@ pub struct AmqpProduceer {
     url: String,
     connection: Option<Connection>,
     channel: Option<Channel>,
-    last_heartbeat: Option<Instant>,
+    previous_confirm_timestamp: Option<Instant>,
     cache: Arc<ParkingLotMutex<MemoryCache>>,
     declared_exchanges: HashMap<String, ExchangeType>,
-    message_stats: HashMap<String, MessageStats>,
+    message_statistic: HashMap<String, MessageStatistic>,
 }
 
 impl AmqpProduceer {
@@ -78,10 +78,10 @@ impl AmqpProduceer {
             url,
             connection: None,
             channel: None,
-            last_heartbeat: None,
+            previous_confirm_timestamp: None,
             cache,
             declared_exchanges: HashMap::new(),
-            message_stats: HashMap::new(),
+            message_statistic: HashMap::new(),
         }
     }
 
@@ -117,7 +117,10 @@ impl AmqpProduceer {
 
         match Connection::open(&args).await {
             Ok(connection) => {
-                info!("Successfully established connection to RabbitMQ");
+                info!(
+                    "Successfully established connection to RabbitMQ, Host: {}, Port: {}, Username: {}",
+                    host, port, username
+                );
                 self.connection = Some(connection);
                 let channel = self.connection.as_ref().unwrap().open_channel(None).await?;
                 info!("Successfully opened RabbitMQ channel");
@@ -128,7 +131,7 @@ impl AmqpProduceer {
                     .confirm_select(ConfirmSelectArguments::default())
                     .await?;
                 info!("Message confirmation mode enabled");
-                self.last_heartbeat = Some(Instant::now());
+                self.previous_confirm_timestamp = Some(Instant::now());
                 Ok(())
             }
             Err(e) => {
@@ -144,7 +147,7 @@ impl AmqpProduceer {
     fn clear_connection_state(&mut self) {
         self.connection = None;
         self.channel = None;
-        self.last_heartbeat = None;
+        self.previous_confirm_timestamp = None;
         self.declared_exchanges.clear();
     }
 
@@ -218,19 +221,19 @@ impl AmqpProduceer {
         message: &[u8],
         is_retry: bool,
     ) -> Result<()> {
-        let stats_key = Self::get_stats_key(exchange, routing_key);
-        let stats = self
-            .message_stats
-            .entry(stats_key.clone())
+        let statistic_key = Self::get_statistic_key(exchange, routing_key);
+        let statistic = self
+            .message_statistic
+            .entry(statistic_key.clone())
             .or_insert_with(|| {
-                MessageStats::new(
+                MessageStatistic::new(
                     self.url.clone(),
                     exchange.to_string(),
                     routing_key.to_string(),
                 )
             });
-        stats.total_sent += 1;
-        stats.last_updated = Instant::now();
+        statistic.produced += 1;
+        statistic.update_timestamp = Instant::now();
 
         if !self.is_connected() {
             self.connect().await?;
@@ -285,10 +288,10 @@ impl AmqpProduceer {
                     routing_key,
                     message.len()
                 );
-                self.last_heartbeat = Some(Instant::now());
+                self.previous_confirm_timestamp = Some(Instant::now());
 
-                if let Some(stats) = self.message_stats.get_mut(&stats_key) {
-                    stats.total_success += 1;
+                if let Some(statistic) = self.message_statistic.get_mut(&statistic_key) {
+                    statistic.confirmed += 1;
                 }
                 Ok(())
             }
@@ -365,8 +368,8 @@ impl AmqpProduceer {
     }
 
     pub fn is_connected(&mut self) -> bool {
-        if let Some(last_heartbeat) = self.last_heartbeat {
-            if last_heartbeat.elapsed() > Duration::from_secs(30) {
+        if let Some(previous_confirm_timestamp) = self.previous_confirm_timestamp {
+            if previous_confirm_timestamp.elapsed() > Duration::from_secs(30) {
                 self.clear_connection_state();
                 return false;
             }
@@ -376,7 +379,7 @@ impl AmqpProduceer {
         }
     }
 
-    pub async fn retry_message_count(&mut self) -> Result<()> {
+    pub async fn retry_produce_cached_messages(&mut self) -> Result<()> {
         if !self.is_connected() {
             return Ok(());
         }
@@ -422,7 +425,7 @@ impl AmqpProduceer {
             loop {
                 time::sleep(Duration::from_secs(5)).await;
                 let mut producer = producer.lock().await;
-                if let Err(e) = producer.retry_message_count().await {
+                if let Err(e) = producer.retry_produce_cached_messages().await {
                     error!("Failed to retry cached messages: {}", e);
                 }
             }
@@ -446,21 +449,25 @@ impl AmqpProduceer {
         });
     }
 
-    fn get_stats_key(exchange: &str, routing_key: &str) -> String {
+    fn get_statistic_key(exchange: &str, routing_key: &str) -> String {
         format!("{}:{}", exchange, routing_key)
+    }
+
+    pub fn clear_report_cache(&mut self) {
+        self.message_statistic.clear();
     }
 
     pub fn generate_report(&self, duration: Duration) -> Vec<PeriodProduceReport> {
         let now = Instant::now();
         let mut report = Vec::new();
-        for stats in self.message_stats.values() {
-            if now.duration_since(stats.last_updated) < duration {
+        for statistic in self.message_statistic.values() {
+            if now.duration_since(statistic.update_timestamp) < duration {
                 report.push(PeriodProduceReport {
-                    url: stats.url.clone(),
-                    exchange: stats.exchange.clone(),
-                    routing_key: stats.routing_key.clone(),
-                    total_sent: stats.total_sent,
-                    total_success: stats.total_success,
+                    url: statistic.url.clone(),
+                    exchange: statistic.exchange.clone(),
+                    routing_key: statistic.routing_key.clone(),
+                    produced: statistic.produced,
+                    confirmed: statistic.confirmed,
                 });
             }
         }
@@ -478,8 +485,8 @@ pub struct PeriodProduceReport {
     pub url: String,
     pub exchange: String,
     pub routing_key: String,
-    pub total_sent: u64,
-    pub total_success: u64,
+    pub produced: u64,
+    pub confirmed: u64,
 }
 
 pub struct CacheReport {
@@ -533,8 +540,9 @@ impl AmqpConnectionManager {
         let mut produce_report = Vec::new();
 
         for producer in self.producers.values() {
-            let producer_guard = producer.lock().await;
+            let mut producer_guard = producer.lock().await;
             produce_report.extend(producer_guard.generate_report(duration));
+            producer_guard.clear_report_cache();
         }
 
         let cache = self.cache.lock();
@@ -677,7 +685,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_message_stats_rely_on_local_rabbitmq() {
+    async fn test_message_statistic_rely_on_local_rabbitmq() {
         let db = Arc::new(ParkingLotMutex::new(DB::new().unwrap()));
         let mut producer = AmqpProduceer::new(
             TEST_RABBITMQ_URL.to_string(),
@@ -701,13 +709,13 @@ mod tests {
             url,
             exchange,
             routing_key,
-            total_sent,
-            total_success,
+            produced,
+            confirmed,
         } = &report[0];
         assert_eq!(url, TEST_RABBITMQ_URL);
         assert_eq!(exchange, "test_exchange");
         assert_eq!(routing_key, "test.key");
-        assert_eq!(*total_sent, 1);
-        assert_eq!(*total_success, result.is_ok() as u64);
+        assert_eq!(*produced, 1);
+        assert_eq!(*confirmed, result.is_ok() as u64);
     }
 }
