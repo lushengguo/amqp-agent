@@ -457,7 +457,7 @@ impl AmqpProduceer {
         self.message_statistic.clear();
     }
 
-    pub fn generate_report(&self, duration: Duration) -> Vec<PeriodProduceReport> {
+    pub fn generate_report(&mut self, duration: Duration) -> Vec<PeriodProduceReport> {
         let now = Instant::now();
         let mut report = Vec::new();
         for statistic in self.message_statistic.values() {
@@ -470,6 +470,11 @@ impl AmqpProduceer {
                     confirmed: statistic.confirmed,
                 });
             }
+        }
+
+        for statistic in self.message_statistic.values_mut() {
+            statistic.produced = 0;
+            statistic.confirmed = 0;
         }
         report
     }
