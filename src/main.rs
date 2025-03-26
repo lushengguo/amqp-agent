@@ -133,7 +133,7 @@ async fn start_report_task() {
 
             for report in produce_reports {
                 info!(
-                    "PRODUCE REPORT - url:{}, exchange:{}, routingkey:{}, produceed:{}, cnofirmed:{}",
+                    "PRODUCE REPORT - url:{}, exchange:{}, routingkey:{}, produced:{}, confirmed:{}",
                     report.url,
                     report.exchange,
                     report.routing_key,
