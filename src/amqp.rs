@@ -29,13 +29,12 @@ type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 lazy_static::lazy_static! {
     pub static ref CONNECTION_MANAGER: Arc<TokioMutex<AmqpConnectionManager>> = {
-        let settings = config::Settings::new().expect("Failed to load config");
+        let settings = config::Settings::new("./config/amqp_agent.yaml").expect("Failed to load config");
         let cache_size = config::parse_size(&settings.cache.max_size)
             .expect("Failed to parse cache size");
         let db = Arc::new(ParkingLotMutex::new(DB::new().expect("Failed to create DB")));
-        let cache = Arc::new(ParkingLotMutex::new(MemoryCache::new(cache_size, db.clone())));
-
-        Arc::new(   TokioMutex::new(AmqpConnectionManager::new(db, cache)))
+        let cache = Arc::new(ParkingLotMutex::new(MemoryCache::new(cache_size, db.clone(), settings.cache.enable_sqlite)));
+        Arc::new(TokioMutex::new(AmqpConnectionManager::new(db, cache)))
     };
 }
 
@@ -582,7 +581,11 @@ mod tests {
         let db = Arc::new(ParkingLotMutex::new(DB::new().unwrap()));
         let mut producer = AmqpProduceer::new(
             TEST_RABBITMQ_URL.to_string(),
-            Arc::new(ParkingLotMutex::new(MemoryCache::new(1000, db.clone()))),
+            Arc::new(ParkingLotMutex::new(MemoryCache::new(
+                1000,
+                db.clone(),
+                true,
+            ))),
         );
 
         match producer.connect().await {
@@ -599,7 +602,11 @@ mod tests {
         let db = Arc::new(ParkingLotMutex::new(DB::new().unwrap()));
         let mut producer = AmqpProduceer::new(
             TEST_RABBITMQ_URL.to_string(),
-            Arc::new(ParkingLotMutex::new(MemoryCache::new(1000, db.clone()))),
+            Arc::new(ParkingLotMutex::new(MemoryCache::new(
+                1000,
+                db.clone(),
+                true,
+            ))),
         );
 
         let test_cases = vec![
@@ -643,7 +650,11 @@ mod tests {
         let db = Arc::new(ParkingLotMutex::new(DB::new().unwrap()));
         let mut producer = AmqpProduceer::new(
             "amqp://guest:guest@non_existent_host:5672".to_string(),
-            Arc::new(ParkingLotMutex::new(MemoryCache::new(1000, db.clone()))),
+            Arc::new(ParkingLotMutex::new(MemoryCache::new(
+                1000,
+                db.clone(),
+                true,
+            ))),
         );
 
         match producer.connect().await {
@@ -657,7 +668,11 @@ mod tests {
     #[tokio::test]
     async fn test_produce_with_cache() {
         let db = Arc::new(ParkingLotMutex::new(DB::new().unwrap()));
-        let cache = Arc::new(ParkingLotMutex::new(MemoryCache::new(1000, db.clone())));
+        let cache = Arc::new(ParkingLotMutex::new(MemoryCache::new(
+            1000,
+            db.clone(),
+            true,
+        )));
         let mut producer = AmqpProduceer::new(
             "amqp://guest:guest@non_existent_host:5672".to_string(),
             cache.clone(),
@@ -694,7 +709,11 @@ mod tests {
         let db = Arc::new(ParkingLotMutex::new(DB::new().unwrap()));
         let mut producer = AmqpProduceer::new(
             TEST_RABBITMQ_URL.to_string(),
-            Arc::new(ParkingLotMutex::new(MemoryCache::new(1000, db.clone()))),
+            Arc::new(ParkingLotMutex::new(MemoryCache::new(
+                1000,
+                db.clone(),
+                true,
+            ))),
         );
 
         let result = producer

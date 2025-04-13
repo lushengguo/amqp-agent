@@ -1,0 +1,11 @@
+server:
+  port: 8080
+  host: "127.0.0.1"
+cache:
+  max_size: "100MB"
+  enable_sqlite: false
+log:
+  # Log levels: debug, info, warn, error
+  level: "debug"
+  dir: "logs"
+  max_kept_files: 5 

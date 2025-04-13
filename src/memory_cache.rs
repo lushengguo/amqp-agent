@@ -13,10 +13,11 @@ pub struct MemoryCache {
     current_size: usize,
     max_size: usize,
     db: Arc<ParkingLotMutex<DB>>,
+    enable_sqlite: bool,
 }
 
 impl MemoryCache {
-    pub fn new(max_size: usize, db: Arc<ParkingLotMutex<DB>>) -> Self {
+    pub fn new(max_size: usize, db: Arc<ParkingLotMutex<DB>>, enable_sqlite: bool) -> Self {
         if max_size == 0 {
             panic!("Max size must be greater than 0");
         }
@@ -26,6 +27,7 @@ impl MemoryCache {
             current_size: 0,
             max_size,
             db,
+            enable_sqlite,
         }
     }
 
@@ -71,24 +73,32 @@ impl MemoryCache {
             to_db.push((*message).clone());
         }
 
-        match self.db.try_lock_for(LOCK_TIMEOUT) {
-            Some(mut db) => {
-                if let Err(e) = db.batch_insert(&to_db) {
-                    warn!("Failed to flush data to database: {}", e);
-                } else {
-                    info!("Successfully flushed {} messages to database", to_db.len());
+        if self.enable_sqlite {
+            match self.db.try_lock_for(LOCK_TIMEOUT) {
+                Some(mut db) => {
+                    if let Err(e) = db.batch_insert(&to_db) {
+                        warn!("Failed to flush data to database: {}", e);
+                    } else {
+                        info!("Successfully flushed {} messages to database", to_db.len());
 
-                    for locator in to_remove {
-                        if let Some(message) = self.messages.remove(&locator) {
-                            self.current_size -= Self::calculate_message_size(&message);
+                        for locator in to_remove {
+                            if let Some(message) = self.messages.remove(&locator) {
+                                self.current_size -= Self::calculate_message_size(&message);
+                            }
                         }
                     }
                 }
+                None => {
+                    let bt = std::backtrace::Backtrace::capture();
+                    error!("Deadlock detected in flush_oldest_to_db: {:?}", bt);
+                    panic!("Deadlock detected while trying to acquire database lock");
+                }
             }
-            None => {
-                let bt = std::backtrace::Backtrace::capture();
-                error!("Deadlock detected in flush_oldest_to_db: {:?}", bt);
-                panic!("Deadlock detected while trying to acquire database lock");
+        } else {
+            for locator in to_remove {
+                if let Some(message) = self.messages.remove(&locator) {
+                    self.current_size -= Self::calculate_message_size(&message);
+                }
             }
         }
     }
@@ -98,7 +108,7 @@ impl MemoryCache {
         result.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         result.truncate(n);
 
-        if result.len() < n {
+        if result.len() < n && self.enable_sqlite {
             match self.db.try_lock_for(LOCK_TIMEOUT) {
                 Some(db) => {
                     if let Ok(db_messages) = db.get_recent_messages((n - result.len()) as u64) {
@@ -136,6 +146,15 @@ impl MemoryCache {
     }
 
     pub fn remove(&mut self, locator: &str) -> Option<Message> {
+        if !self.enable_sqlite {
+            if let Some(message) = self.messages.remove(locator) {
+                self.current_size -= Self::calculate_message_size(&message);
+                return Some(message);
+            } else {
+                return None;
+            }
+        }
+
         match self.db.try_lock_for(LOCK_TIMEOUT) {
             Some(mut db) => {
                 db.remove_message(&[locator.to_string()]).unwrap();
@@ -186,7 +205,7 @@ mod tests {
         let db_path = format!("test_cache_db_{}.sqlite", rand::random::<u32>());
         let db = DB::new_with_path(&db_path).unwrap();
         let db_arc = Arc::new(ParkingLotMutex::new(db));
-        let cache = MemoryCache::new(max_size, db_arc.clone());
+        let cache = MemoryCache::new(max_size, db_arc.clone(), true);
         (cache, db_arc, db_path)
     }
 

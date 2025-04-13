@@ -81,7 +81,7 @@ async fn clean_old_logs(
     }
 
     let entries = fs::read_dir(log_dir)?;
-    let max_files = config.max_files;
+    let max_kept_files = config.max_kept_files;
     let mut files: Vec<_> = entries
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
@@ -94,8 +94,8 @@ async fn clean_old_logs(
 
     files.sort_by_key(|entry| entry.metadata().unwrap().modified().unwrap());
 
-    if files.len() > max_files as usize {
-        for file in files.iter().take(files.len() - max_files as usize) {
+    if files.len() > max_kept_files as usize {
+        for file in files.iter().take(files.len() - max_kept_files as usize) {
             if let Err(e) = fs::remove_file(file.path()) {
                 tracing::error!("Error deleting old log file: {}", e);
             } else {

@@ -172,7 +172,7 @@ fn start_dead_lock_detection(period: Duration) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let settings = config::Settings::new()?;
+    let settings = config::Settings::new("config/amqp_agent.yaml")?;
 
     logger::init_logger(&settings.log)?;
     logger::start_log_cleaner(settings.log.clone());
