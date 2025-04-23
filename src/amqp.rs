@@ -262,12 +262,13 @@ impl AmqpProduceer {
 
         let log_prefix = if is_retry { "[RETRY]" } else { "" };
         debug!(
-            "{}Preparing to send message - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes",
+            "{}Preparing to send message - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes, Message Body: {}",
             log_prefix,
             exchange,
             exchange_type_str,
             routing_key,
-            message.len()
+            message.len(), 
+            String::from_utf8_lossy(message)
         );
 
         let args = BasicPublishArguments::new(exchange, routing_key);
@@ -280,12 +281,13 @@ impl AmqpProduceer {
         {
             Ok(_) => {
                 debug!(
-                    "{}Message sent successfully - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes",
+                    "{}Message sent successfully - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes, Message Body: {}",
                     log_prefix,
                     exchange,
                     exchange_type_str,
                     routing_key,
-                    message.len()
+                    message.len(),
+                    String::from_utf8_lossy(message)
                 );
                 self.previous_confirm_timestamp = Some(Instant::now());
 
