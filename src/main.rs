@@ -175,9 +175,23 @@ async fn main() -> Result<()> {
     let settings = config::Settings::new("config/amqp_agent.yaml")?;
 
     logger::init_logger(&settings.log)?;
-    logger::start_log_cleaner(settings.log.clone());
 
     info!("Logger initialized successfully");
+
+    tokio::spawn(async move {
+        loop {
+            match config::Settings::new("config/amqp_agent.yaml") {
+                Ok(settings) => {
+                    info!("Config reloaded successfully");
+                    logger::set_logger_level(settings.log.level);
+                }
+                Err(e) => {
+                    error!("Failed to reload config: {}", e);
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
 
     start_dead_lock_detection(Duration::from_secs(10));
     start_report_task().await;
