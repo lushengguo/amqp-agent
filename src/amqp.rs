@@ -20,7 +20,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{future::Future, pin::Pin};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::time::{self, Instant};
-use tracing::{debug, error, info, warn};
 use url::Url;
 
 const MAX_CONNECT_RETRIES: u32 = 3;
@@ -108,7 +107,7 @@ impl AmqpProduceer {
 
     async fn do_connect(&mut self) -> Result<()> {
         let (host, username, password, port) = Self::parse_amqp_url(&self.url)?;
-        info!(
+log::info!(
             "Connecting to RabbitMQ server - Host: {}, Port: {}, Username: {}",
             host, port, username
         );
@@ -116,25 +115,25 @@ impl AmqpProduceer {
 
         match Connection::open(&args).await {
             Ok(connection) => {
-                info!(
+log::info!(
                     "Successfully established connection to RabbitMQ, Host: {}, Port: {}, Username: {}",
                     host, port, username
                 );
                 self.connection = Some(connection);
                 let channel = self.connection.as_ref().unwrap().open_channel(None).await?;
-                info!("Successfully opened RabbitMQ channel");
+log::info!("Successfully opened RabbitMQ channel");
                 self.channel = Some(channel);
                 self.channel
                     .as_ref()
                     .unwrap()
                     .confirm_select(ConfirmSelectArguments::default())
                     .await?;
-                info!("Message confirmation mode enabled");
+log::info!("Message confirmation mode enabled");
                 self.previous_confirm_timestamp = Some(Instant::now());
                 Ok(())
             }
             Err(e) => {
-                error!(
+log::error!(
                     "Failed to connect to RabbitMQ - Host: {}, Port: {}, Username: {}, Error: {}",
                     host, port, username, e
                 );
@@ -162,7 +161,7 @@ impl AmqpProduceer {
                     Ok(_) => return Ok(()),
                     Err(e) => {
                         let error_msg = format!("Failed to connect to RabbitMQ: {}", e);
-                        warn!("{}, will retry in 3 seconds", error_msg);
+log::warn!("{}, will retry in 3 seconds", error_msg);
                         time::sleep(Duration::from_secs(3)).await;
                         retries += 1;
                     }
@@ -187,7 +186,7 @@ impl AmqpProduceer {
         }
 
         if let Some(channel) = &self.channel {
-            info!(
+log::info!(
                 "Declaring Exchange - Name: {}, Type: {:?}",
                 exchange, exchange_type
             );
@@ -203,7 +202,7 @@ impl AmqpProduceer {
                 exchange.to_string(),
                 ExchangeType::from(exchange_type.to_string()),
             );
-            info!("Exchange declared successfully - {}", exchange);
+log::info!("Exchange declared successfully - {}", exchange);
             Ok(())
         } else {
             Err(Box::new(AmqpError::ChannelUseError(
@@ -244,7 +243,7 @@ impl AmqpProduceer {
             "topic" => ExchangeType::Topic,
             "headers" => ExchangeType::Headers,
             _ => {
-                warn!(
+log::warn!(
                     "Unknown Exchange type: {}, using default type Topic",
                     exchange_type
                 );
@@ -254,14 +253,14 @@ impl AmqpProduceer {
 
         let exchange_type_str = exchange_type.to_string();
         if let Err(e) = self.declare_exchange(exchange, &exchange_type).await {
-            warn!(
+log::warn!(
                 "Failed to declare Exchange: {} - attempting to send message anyway",
                 e
             );
         }
 
         let log_prefix = if is_retry { "[RETRY]" } else { "" };
-        debug!(
+log::debug!(
             "{}Preparing to send message - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes, Message Body: {}",
             log_prefix,
             exchange,
@@ -280,7 +279,7 @@ impl AmqpProduceer {
             .await
         {
             Ok(_) => {
-                debug!(
+log::debug!(
                     "{}Message sent successfully - Exchange: {} ({:?}), RoutingKey: {}, Message size: {} bytes, Message Body: {}",
                     log_prefix,
                     exchange,
@@ -306,7 +305,7 @@ impl AmqpProduceer {
                     message.len(),
                     e
                 );
-                error!("{}", error_msg);
+log::error!("{}", error_msg);
                 if !is_retry {
                     self.cache_message(exchange, exchange_type_str, routing_key, message)
                         .await?;
@@ -325,7 +324,7 @@ impl AmqpProduceer {
     ) -> Result<()> {
         let message_str = String::from_utf8_lossy(message).to_string();
         let exchange_type_clone = exchange_type.clone();
-        info!(
+log::info!(
             "Caching message - Exchange: {} ({}), RoutingKey: {}, Message size: {} bytes",
             exchange,
             exchange_type_clone,
@@ -351,7 +350,7 @@ impl AmqpProduceer {
         let routing_key_clone = message.routing_key.clone();
 
         cache.insert(message);
-        info!(
+log::info!(
             "Message cached successfully - Exchange: {} ({}), RoutingKey: {}, Current memory usage: {} bytes, cached {} messages",
             exchange,
             exchange_type_clone,
@@ -359,7 +358,7 @@ impl AmqpProduceer {
             cache.memory_usage(),
             cache.message_count()
         );
-        info!(
+log::info!(
             "Removing message from cache - Exchange: {}, RoutingKey: {}, Total messages in cache: {}",
             exchange_clone, routing_key_clone,
             cache.message_count()
@@ -406,14 +405,14 @@ impl AmqpProduceer {
                     let locator = message.locator();
                     let exchange = message.exchange.clone();
                     let routing_key = message.routing_key.clone();
-                    debug!(
+log::debug!(
                         "[RETRY] Successfully removed message from cache - Exchange: {}, RoutingKey: {}",
                         exchange, routing_key
                     );
                     cache.remove(&locator);
                 }
                 Err(e) => {
-                    error!("[RETRY] Failed to retry message: {}", e);
+log::error!("[RETRY] Failed to retry message: {}", e);
                 }
             }
         }
@@ -427,7 +426,7 @@ impl AmqpProduceer {
                 time::sleep(Duration::from_secs(5)).await;
                 let mut producer = producer.lock().await;
                 if let Err(e) = producer.retry_produce_cached_messages().await {
-                    error!("Failed to retry produce cached messages: {}", e);
+log::error!("Failed to retry produce cached messages: {}", e);
                 }
             }
         });
@@ -439,11 +438,11 @@ impl AmqpProduceer {
                 time::sleep(Duration::from_secs(15)).await;
                 let mut producer = producer.lock().await;
                 if !producer.is_connected() {
-                    warn!("Heartbeat check failed, reconnecting to {}", producer.url);
+log::warn!("Heartbeat check failed, reconnecting to {}", producer.url);
                     if let Err(e) = producer.connect().await {
-                        error!("Failed to reconnect: {}", e);
+log::error!("Failed to reconnect: {}", e);
                     } else {
-                        info!("Reconnected to {}", producer.url);
+log::info!("Reconnected to {}", producer.url);
                     }
                 }
             }

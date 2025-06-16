@@ -4,7 +4,6 @@ use parking_lot::Mutex as ParkingLotMutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info, warn};
 
 const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -77,9 +76,9 @@ impl MemoryCache {
             match self.db.try_lock_for(LOCK_TIMEOUT) {
                 Some(mut db) => {
                     if let Err(e) = db.batch_insert(&to_db) {
-                        warn!("Failed to flush data to database: {}", e);
+log::warn!("Failed to flush data to database: {}", e);
                     } else {
-                        info!("Successfully flushed {} messages to database", to_db.len());
+log::info!("Successfully flushed {} messages to database", to_db.len());
 
                         for locator in to_remove {
                             if let Some(message) = self.messages.remove(&locator) {
@@ -90,7 +89,7 @@ impl MemoryCache {
                 }
                 None => {
                     let bt = std::backtrace::Backtrace::capture();
-                    error!("Deadlock detected in flush_oldest_to_db: {:?}", bt);
+log::error!("Deadlock detected in flush_oldest_to_db: {:?}", bt);
                     panic!("Deadlock detected while trying to acquire database lock");
                 }
             }
@@ -127,7 +126,7 @@ impl MemoryCache {
                 }
                 None => {
                     let bt = std::backtrace::Backtrace::capture();
-                    error!("Deadlock detected in get_recent_messages: {:?}", bt);
+log::error!("Deadlock detected in get_recent_messages: {:?}", bt);
                     panic!("Deadlock detected while trying to acquire database lock");
                 }
             }
@@ -167,7 +166,7 @@ impl MemoryCache {
             }
             None => {
                 let bt = std::backtrace::Backtrace::capture();
-                error!("Deadlock detected in remove: {:?}", bt);
+log::error!("Deadlock detected in remove: {:?}", bt);
                 panic!("Deadlock detected while trying to acquire database lock");
             }
         }

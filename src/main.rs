@@ -19,7 +19,6 @@ use tokio::{
     net::{TcpListener, TcpStream},
     time,
 };
-use tracing::{debug, error, info, warn};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -97,7 +96,7 @@ async fn process_connection(mut stream: TcpStream) -> Result<()> {
     loop {
         line.clear();
         if reader.read_line(&mut line).await? == 0 {
-            debug!("Connection closed");
+            log::debug!("Connection closed");
             break;
         }
 
@@ -112,11 +111,11 @@ async fn process_connection(mut stream: TcpStream) -> Result<()> {
                 )
                 .await
                 {
-                    error!("Failed to produce message to RabbitMQ: {}", e);
+                    log::error!("Failed to produce message to RabbitMQ: {}", e);
                 }
             }
             Err(e) => {
-                warn!("JSON parsing error: {}", e);
+                log::warn!("JSON parsing error: {}", e);
             }
         }
     }
@@ -132,7 +131,7 @@ async fn start_report_task() {
             let (produce_reports, cache_report) = manager.generate_reports(period).await;
 
             for report in produce_reports {
-                info!(
+                log::info!(
                     "PRODUCE REPORT - url:{}, exchange:{}, routingkey:{}, produced:{}, confirmed:{}",
                     report.url,
                     report.exchange,
@@ -142,7 +141,7 @@ async fn start_report_task() {
                 );
             }
 
-            info!(
+            log::info!(
                 "CACHE REPORT - memory cached {} messages, memory usage: {},  disk cached {} messages, disk usage: {}",
                 cache_report.in_memory_message_count, cache_report.memory_usage,  cache_report.in_disk_message_count, cache_report.disk_usage
             );
@@ -158,11 +157,11 @@ fn start_dead_lock_detection(period: Duration) {
             if deadlocks.is_empty() {
                 continue;
             }
-            debug!("detect {} deadlock!", deadlocks.len());
+            log::debug!("detect {} deadlock!", deadlocks.len());
             for (i, threads) in deadlocks.iter().enumerate() {
                 println!("deadlock {} related threads:", i);
                 for thread in threads {
-                    error!("{:?}", thread.backtrace());
+                    log::error!("{:?}", thread.backtrace());
                 }
             }
             panic!("deadlock detected");
@@ -176,17 +175,16 @@ async fn main() -> Result<()> {
 
     logger::init_logger(&settings.log)?;
 
-    info!("Logger initialized successfully");
+    log::info!("Logger initialized successfully");
 
     tokio::spawn(async move {
         loop {
             match config::Settings::new("config/amqp_agent.yaml") {
                 Ok(settings) => {
-                    info!("Config reloaded successfully");
                     logger::set_logger_level(settings.log.level);
                 }
                 Err(e) => {
-                    error!("Failed to reload config: {}", e);
+                    log::error!("Failed to reload config: {}", e);
                 }
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -198,20 +196,20 @@ async fn main() -> Result<()> {
 
     let addr = format!("{}:{}", settings.server.host, settings.server.port);
     let listener = TcpListener::bind(&addr).await?;
-    info!("Server started on {}", addr);
+    log::info!("Server started on {}", addr);
 
     loop {
         match listener.accept().await {
             Ok((socket, addr)) => {
-                info!("New connection: {}", addr);
+                log::info!("New connection: {}", addr);
                 tokio::spawn(async move {
                     if let Err(e) = process_connection(socket).await {
-                        error!("Error processing connection: {}", e);
+                        log::error!("Error processing connection: {}", e);
                     }
                 });
             }
             Err(e) => {
-                error!("Error accepting connection: {}", e);
+                log::error!("Error accepting connection: {}", e);
             }
         }
     }
